@@ -30,6 +30,11 @@ class WP_Flickr_Portfolio_Media_Sync {
 	const MAX_RATE_LIMIT_RESCHEDULES = 6;
 
 	/**
+	 * TTL in seconds for the user-requested stop flag transient.
+	 */
+	const STOP_FLAG_TTL = 5 * MINUTE_IN_SECONDS;
+
+	/**
 	 * Background worker cron hook for queued scheduled-source batches.
 	 */
 	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
@@ -81,6 +86,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		add_action( 'admin_post_wpfp_remove_scheduled_source', array( $this, 'handle_remove_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_toggle_scheduled_source', array( $this, 'handle_toggle_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_run_scheduled_source', array( $this, 'handle_run_scheduled_source' ) );
+		add_action( 'admin_post_wpfp_stop_scheduled_source', array( $this, 'handle_stop_scheduled_source' ) );
 		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_scheduled_source_worker' ), 10, 1 );
 		add_action( self::CRON_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
 		add_filter( 'cron_schedules', array( __CLASS__, 'register_cron_schedules' ) );
@@ -476,6 +482,36 @@ class WP_Flickr_Portfolio_Media_Sync {
 		}
 
 		$this->redirect_with_notice( 'schedule_run_queued' );
+	}
+
+	/**
+	 * Handle user-initiated stop of an in-progress scheduled source.
+	 *
+	 * @return void
+	 */
+	public function handle_stop_scheduled_source() {
+		$this->assert_manage_options();
+
+		$base_key = isset( $_GET['base_key'] ) ? sanitize_text_field( wp_unslash( $_GET['base_key'] ) ) : '';
+		check_admin_referer( 'wpfp_stop_scheduled_source_' . $base_key );
+
+		if ( ! $base_key ) {
+			$this->redirect_with_notice( 'schedule_error' );
+		}
+
+		set_transient( $this->stop_flag_key( $base_key ), 1, self::STOP_FLAG_TTL );
+		wp_clear_scheduled_hook( self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
+
+		$records = $this->get_scheduled_sources();
+		if ( ! empty( $records[ $base_key ] ) && is_array( $records[ $base_key ] ) ) {
+			$records[ $base_key ]['last_status']  = 'stopped';
+			$records[ $base_key ]['last_message'] = __( 'Sync stopped by user.', 'wp-flickr-portfolio' );
+			$records[ $base_key ]['last_run_at']  = time();
+			$this->save_scheduled_sources( $records );
+		}
+
+		$this->logger->info( 'media_sync', 'Scheduled source stopped by user.', array( 'base_key' => $base_key ), 'schedule_stopped' );
+		$this->redirect_with_notice( 'schedule_stopped' );
 	}
 
 	/**
@@ -1632,6 +1668,14 @@ class WP_Flickr_Portfolio_Media_Sync {
 		}
 
 		set_transient( $lock_key, time(), self::SCHEDULE_LOCK_TTL );
+
+		$stop_flag_key = $this->stop_flag_key( $base_key );
+		if ( get_transient( $stop_flag_key ) ) {
+			delete_transient( $stop_flag_key );
+			delete_transient( $lock_key );
+			return array( 'status' => 'stopped' );
+		}
+
 		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
 
 		try {
@@ -1689,7 +1733,61 @@ class WP_Flickr_Portfolio_Media_Sync {
 
 				if ( is_wp_error( $import_result ) ) {
 					if ( 'wpfp_original_transport_rate_limited' === $import_result->get_error_code() ) {
-						return $this->reschedule_scheduled_source_after_rate_limit( $base_key, $record, $import_result );
+						$rate_attempts = absint( $record['progress_rate_limit_attempts'] ?? 0 );
+
+						if ( $rate_attempts < self::MAX_RATE_LIMIT_RESCHEDULES ) {
+							// Still within retry budget — reschedule with exponential delay.
+							$record['progress_current_index'] = $current_index;
+							return $this->reschedule_scheduled_source_after_rate_limit( $base_key, $record, $import_result );
+						}
+
+						// Retry budget exhausted. Try display_url before giving up on this photo.
+						$photo_id    = (string) ( $photo['id'] ?? '' );
+						$imported    = false;
+						$display_url = (string) ( $photo['display_url'] ?? '' );
+						$full_url    = (string) ( $photo['full_url'] ?? '' );
+
+						if ( $display_url && $display_url !== $full_url ) {
+							$fallback_result = $this->import_photo(
+								$photo,
+								! empty( $record['refresh_existing'] ),
+								array( 'prefer_original' => false, 'allow_resized_fallback' => false )
+							);
+
+							if ( ! is_wp_error( $fallback_result ) ) {
+								$record['progress_processed_items']     = absint( $record['progress_processed_items'] ?? 0 ) + 1;
+								$record['progress_rate_limit_attempts'] = 0;
+								if ( 'created' === ( $fallback_result['status'] ?? '' ) ) {
+									$record['progress_created'] = absint( $record['progress_created'] ?? 0 ) + 1;
+								} elseif ( 'updated' === ( $fallback_result['status'] ?? '' ) ) {
+									$record['progress_updated'] = absint( $record['progress_updated'] ?? 0 ) + 1;
+								} else {
+									$record['progress_reused'] = absint( $record['progress_reused'] ?? 0 ) + 1;
+								}
+								$this->logger->warning(
+									'media_sync',
+									sprintf( 'Photo %s original was rate-limited after %d attempts; imported via display URL.', $photo_id, $rate_attempts ),
+									array( 'base_key' => $base_key, 'photo_id' => $photo_id, 'attempts' => $rate_attempts ),
+									'schedule_original_fallback'
+								);
+								$imported = true;
+							}
+						}
+
+						if ( ! $imported ) {
+							$record['progress_skipped']                 = absint( $record['progress_skipped'] ?? 0 ) + 1;
+							$record['progress_rate_limit_attempts']     = 0;
+							$this->logger->warning(
+								'media_sync',
+								sprintf( 'Skipping photo %s after %d persistent rate-limit failures.', $photo_id, $rate_attempts ),
+								array( 'base_key' => $base_key, 'photo_id' => $photo_id, 'attempts' => $rate_attempts ),
+								'schedule_photo_skipped'
+							);
+						}
+
+						$current_index++;
+						$processed_now++;
+						continue;
 					}
 
 					return $this->mark_scheduled_source_failed( $base_key, $import_result );
@@ -1707,6 +1805,18 @@ class WP_Flickr_Portfolio_Media_Sync {
 
 				$current_index++;
 				$processed_now++;
+
+				if ( get_transient( $stop_flag_key ) ) {
+					delete_transient( $stop_flag_key );
+					$record['progress_current_index'] = $current_index;
+					$record['last_status']            = 'stopped';
+					$record['last_message']           = __( 'Sync stopped by user.', 'wp-flickr-portfolio' );
+					$record['last_run_at']            = time();
+					$records[ $base_key ]             = $record;
+					$this->save_scheduled_sources( $records );
+					$this->logger->info( 'media_sync', 'Batch stopped by user.', array( 'base_key' => $base_key ), 'schedule_stopped' );
+					return array( 'status' => 'stopped' );
+				}
 			}
 
 			if ( $current_index >= count( $photos ) ) {
@@ -1815,7 +1925,8 @@ class WP_Flickr_Portfolio_Media_Sync {
 		$record['progress_updated']         = 0;
 		$record['progress_reused']          = 0;
 		$record['progress_rate_limit_attempts'] = 0;
-		$record['progress_current_photo_id'] = '';
+		$record['progress_skipped']             = 0;
+		$record['progress_current_photo_id']    = '';
 
 		return $record;
 	}
@@ -1973,6 +2084,16 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 */
 	private function scheduled_source_lock_key( $base_key ) {
 		return 'wpfp_schedule_lock_' . md5( (string) $base_key );
+	}
+
+	/**
+	 * Build the transient key for a user-requested stop flag.
+	 *
+	 * @param string $base_key Source key.
+	 * @return string
+	 */
+	private function stop_flag_key( $base_key ) {
+		return 'wpfp_schedule_stop_' . md5( (string) $base_key );
 	}
 
 	/**

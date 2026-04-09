@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.14.1
+Stable tag: 0.15.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -80,6 +80,12 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.15.0 =
+
+- Fixed scheduled sync permanently failing after Flickr CDN rate-limits an original download: after exhausting retries the plugin now falls back to the large display-size image for that photo instead of aborting the whole sync run.
+- Added skip-and-continue behaviour when the display-size fallback also fails, so a single stubborn photo never blocks the remaining queue.
+- Added a Stop button in the Scheduled Sources table that cancels a queued or running sync immediately, clearing pending worker events and updating status without disrupting the recurring cron schedule.
 
 = 0.14.1 =
 

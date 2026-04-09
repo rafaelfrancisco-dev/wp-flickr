@@ -468,7 +468,12 @@ class WP_Flickr_Portfolio_Settings {
 								<td><?php echo esc_html( $this->format_last_run( $record ) ); ?></td>
 								<td><?php $this->render_status_cell( $record ); ?></td>
 								<td>
-									<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_run_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_run_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Run Now', 'wp-flickr-portfolio' ); ?></a>
+									<?php $is_active = in_array( (string) ( $record['last_status'] ?? '' ), array( 'queued', 'running' ), true ); ?>
+									<?php if ( $is_active ) : ?>
+										<a class="button button-small button-primary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_stop_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_stop_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Stop', 'wp-flickr-portfolio' ); ?></a>
+									<?php else : ?>
+										<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_run_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_run_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Run Now', 'wp-flickr-portfolio' ); ?></a>
+									<?php endif; ?>
 									<?php if ( ! empty( $record['enabled'] ) ) : ?>
 										<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_toggle_scheduled_source&base_key=' . rawurlencode( $base_key ) . '&enabled=0' ), 'wpfp_toggle_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Disable', 'wp-flickr-portfolio' ); ?></a>
 									<?php else : ?>
@@ -906,6 +911,8 @@ class WP_Flickr_Portfolio_Settings {
 				$state = __( 'Queued', 'wp-flickr-portfolio' );
 			} elseif ( 'running' === $record['last_status'] ) {
 				$state = __( 'Running', 'wp-flickr-portfolio' );
+			} elseif ( 'stopped' === $record['last_status'] ) {
+				$state = __( 'Stopped', 'wp-flickr-portfolio' );
 			}
 		}
 
@@ -991,6 +998,9 @@ class WP_Flickr_Portfolio_Settings {
 				break;
 			case 'schedule_run_queued':
 				$text = __( 'Scheduled source queued to run in the background. Progress will appear in the Scheduled Sources table.', 'wp-flickr-portfolio' );
+				break;
+			case 'schedule_stopped':
+				$text = __( 'Sync stopped. You can run it again at any time.', 'wp-flickr-portfolio' );
 				break;
 			case 'logs_cleared':
 				$text = __( 'Plugin logs cleared.', 'wp-flickr-portfolio' );

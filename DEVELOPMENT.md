@@ -121,6 +121,7 @@ Related options:
 
 ## Recent Notes
 
+- `0.15.0` fixed scheduled sync permanently failing when Flickr's CDN rate-limits original downloads: after exhausting retries the plugin falls back to the large display-size image for that photo, or skips it entirely if the fallback also fails, so the remaining queue always continues. Added a Stop button in the Scheduled Sources table that cancels a queued or running sync without disrupting the recurring cron schedule.
 - `0.14.1` stopped refetching the same Flickr page during deferred rate-limit retries, increased background backoff delays for repeated `429` original-download failures, and added a terminal error when throttling persists across multiple queued attempts.
 - `0.14.0` moved scheduled sync execution into resumable background batches, added persisted per-source progress for the settings UI, and changed Flickr `429` download handling from in-request retries to deferred batch rescheduling.
 - `0.13.1` extended the shared Flickr pacing window to original-file downloads, added bounded retry/backoff for `429` download responses, and improved logs so throttling attempts are visible per photo.
@@ -354,11 +355,7 @@ This is the safer integration path for now because it avoids coupling to undocum
 
 ### Packaging
 
-The repository currently includes an installable ZIP:
-
-`wp-flickr-portfolio-0.11.0.zip`
-
-That ZIP contains the expected top-level plugin folder:
+The repository includes installable ZIPs at the root, one per release. Each ZIP contains the expected top-level plugin folder:
 
 `wp-flickr-portfolio/`
 
