@@ -45,7 +45,7 @@ class WP_Flickr_Portfolio_Settings {
 			'user_nsid'          => '',
 			'username'           => '',
 			'fullname'           => '',
-			'cache_ttl'          => 900,
+			'cache_ttl'          => 86400,
 			'default_per_page'   => 24,
 			'default_layout'     => 'grid',
 		);
@@ -248,7 +248,7 @@ class WP_Flickr_Portfolio_Settings {
 			'user_nsid'          => $current['user_nsid'],
 			'username'           => $current['username'],
 			'fullname'           => $current['fullname'],
-			'cache_ttl'          => isset( $input['cache_ttl'] ) ? max( 60, absint( $input['cache_ttl'] ) ) : (int) $current['cache_ttl'],
+			'cache_ttl'          => isset( $input['cache_ttl'] ) ? max( 3600, absint( $input['cache_ttl'] ) ) : (int) $current['cache_ttl'],
 			'default_per_page'   => isset( $input['default_per_page'] ) ? min( 500, max( 1, absint( $input['default_per_page'] ) ) ) : (int) $current['default_per_page'],
 			'default_layout'     => isset( $input['default_layout'] ) ? $this->normalize_layout( $input['default_layout'] ) : $this->normalize_layout( $current['default_layout'] ),
 		);
@@ -294,7 +294,7 @@ class WP_Flickr_Portfolio_Settings {
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpfp_cache_ttl"><?php esc_html_e( 'Cache TTL (seconds)', 'wp-flickr-portfolio' ); ?></label></th>
-							<td><input id="wpfp_cache_ttl" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[cache_ttl]" type="number" min="60" step="60" value="<?php echo esc_attr( (string) $options['cache_ttl'] ); ?>"></td>
+							<td><input id="wpfp_cache_ttl" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[cache_ttl]" type="number" min="3600" step="3600" value="<?php echo esc_attr( (string) $options['cache_ttl'] ); ?>"><p class="description"><?php esc_html_e( 'Minimum 1 hour (3600 s). Flickr allows 3 600 requests/hour so keep this as high as possible.', 'wp-flickr-portfolio' ); ?></p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpfp_default_per_page"><?php esc_html_e( 'Default items per gallery', 'wp-flickr-portfolio' ); ?></label></th>

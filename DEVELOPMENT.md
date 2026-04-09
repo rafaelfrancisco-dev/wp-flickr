@@ -114,6 +114,7 @@ Related options:
 
 ## Recent Notes
 
+- `0.16.1` increased the default cache TTL from 15 minutes to 24 hours to conserve the Flickr API rate limit (3 600 requests/hour). Centered gallery pagination. Fixed lightbox background click to close when clicking the area around the image.
 - `0.16.0` added a built-in lightbox with full-size image display, EXIF metadata (camera, lens, aperture, shutter speed, ISO, focal length, location), a Flickr link, and prev/next keyboard navigation. Removed Meow Lightbox support, media library import, scheduled sync, and all associated settings.
 
 ### OAuth Flow
@@ -158,6 +159,8 @@ If `user_id` is omitted but the plugin is authenticated, the stored Flickr `user
 ### Caching
 
 Gallery payloads and EXIF data are cached with WordPress transients.
+
+The default cache TTL is 86 400 seconds (24 hours), configurable from the admin screen with a minimum of 3 600 seconds (1 hour). Flickr limits each API key to 3 600 requests per hour so aggressive caching is important.
 
 Cache key inputs:
 

@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, lightbox, exif
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.16.0
+Stable tag: 0.16.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,12 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, gallery rendering, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.16.1 =
+
+- Increased default cache TTL from 15 minutes to 24 hours (minimum 1 hour) to conserve the Flickr API rate limit (3 600 requests per hour).
+- Centered gallery pagination links.
+- Fixed lightbox click-outside-to-close to also trigger when clicking the transparent area around the image.
 
 = 0.16.0 =
 

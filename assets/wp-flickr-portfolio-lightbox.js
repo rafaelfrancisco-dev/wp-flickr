@@ -83,7 +83,7 @@
 		overlay.appendChild(exifBar);
 
 		overlay.addEventListener('click', function (e) {
-			if (e.target === overlay) {
+			if (e.target === overlay || e.target === imgContainer) {
 				close();
 			}
 		});

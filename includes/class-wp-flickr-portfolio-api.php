@@ -82,7 +82,7 @@ class WP_Flickr_Portfolio_API {
 		}
 
 		$cache_key = $this->cache_key( $normalized );
-		$ttl       = (int) $this->settings->get( 'cache_ttl', 900 );
+		$ttl       = (int) $this->settings->get( 'cache_ttl', 86400 );
 
 		if ( ! $bypass_cache ) {
 			$cached = get_transient( $cache_key );
@@ -442,7 +442,7 @@ class WP_Flickr_Portfolio_API {
 			wp_send_json_error( array( 'message' => $exif->get_error_message() ), 500 );
 		}
 
-		set_transient( $cache_key, $exif, max( 60, (int) $this->settings->get( 'cache_ttl', 900 ) ) );
+		set_transient( $cache_key, $exif, max( 3600, (int) $this->settings->get( 'cache_ttl', 86400 ) ) );
 
 		$known_keys   = get_option( 'wpfp_cache_keys', array() );
 		$known_keys[] = $cache_key;

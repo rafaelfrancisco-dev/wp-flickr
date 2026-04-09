@@ -61,6 +61,7 @@ Clicking a gallery image opens the built-in lightbox:
 - If you only need public content, you can skip OAuth and just use a valid Flickr API key and secret.
 - The `Logs` admin screen keeps a rolling in-database history of recent plugin events so debugging does not depend on server log access.
 - EXIF data is cached per photo in both browser memory and WordPress transients.
+- Gallery payloads and EXIF data are cached for 24 hours by default (minimum 1 hour) to conserve the Flickr API rate limit of 3 600 requests per hour.
 
 ## Gutenberg Block
 

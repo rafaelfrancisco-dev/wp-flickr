@@ -132,13 +132,15 @@
 
 .wpfp-pagination {
   margin-top: 1.25rem;
+  text-align: center;
 }
 
 .wpfp-pagination-list {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+  justify-content: center;
 }
 
 .wpfp-page-link {
