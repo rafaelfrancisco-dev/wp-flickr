@@ -66,11 +66,14 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Meow Lightbox should detect the remote galleries out of the box because this plugin renders the `.gallery` class that Meow watches by default.
 - Meow Gallery works best with the synced attachment mode, because imported Flickr images become regular WordPress media items.
 - If you only need public content, you can skip OAuth and just use a valid Flickr API key and secret.
-- Scheduled sync uses WordPress cron for recurring runs. `Run Now` executes immediately in the admin request instead of relying on a background WP-Cron loopback.
-- Flickr documents a shared API-key limit of `3600 queries per hour`, so uncached sync requests are paced conservatively.
+- Scheduled sync uses WordPress cron for recurring runs. `Run Now` now queues a background sync and returns immediately instead of blocking the admin request.
+- Flickr documents a shared API-key limit of `3600 queries per hour`, so uncached sync requests are paced conservatively across both REST lookups and original-file downloads.
 - Scheduled sync prefers Flickr's full/original file when available, so the local full-size attachment keeps the original image bytes and any embedded EXIF that Flickr preserved in that file.
 - Original-file imports now use a plugin-owned downloader with explicit HTTP response logging, file validation, and a cURL retry path when the default WordPress transport fails.
+- Original-file imports also honor the shared Flickr request throttle. When Flickr returns `429 Too Many Requests`, the plugin reschedules the next background batch instead of blocking the current request with repeated retries.
+- Deferred `429` retries now keep the current Flickr page payload cached and increase the background delay materially between attempts instead of re-requesting the same page every few seconds.
 - Media imports now require the Flickr original by default. A new admin setting can re-enable fallback to smaller Flickr display sizes if you explicitly want that behavior.
+- The Scheduled Sync table now shows per-source progress and refreshes automatically while queued background work is running.
 - Attachment-backed modes are matched against the exact source configuration, including `source`, `user_id`, `photoset_id`, `per_page`, `page`, and `privacy_filter`.
 - The `Logs` admin screen keeps a rolling in-database history of recent plugin events so debugging does not depend on server log access.
 - Flickr imports skip intermediate WordPress size generation and disable WordPress big-image downscaling during sideload so the original file is preserved locally.

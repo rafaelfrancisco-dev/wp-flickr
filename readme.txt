@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.13.0
+Stable tag: 0.14.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -80,6 +80,24 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.14.1 =
+
+- Stopped refetching the same Flickr page on every rate-limit retry by reusing the cached page payload while a background sync waits to resume.
+- Increased deferred `429 Too Many Requests` backoff delays materially and capped repeated rate-limit loops with a clearer host-blocked failure message.
+- Kept the queued background sync flow from `0.14.0`, but made its rate-limit behavior less noisy and less wasteful.
+
+= 0.14.0 =
+
+- Changed `Run Now` to queue scheduled sync work in the background instead of holding the admin request open until the import finishes.
+- Split scheduled sync into resumable background batches with persisted per-source progress, plus an auto-refreshing progress bar in the settings table.
+- Changed Flickr original-download `429 Too Many Requests` handling to reschedule the next batch after a bounded delay instead of retrying the same photo repeatedly in one request.
+
+= 0.13.1 =
+
+- Extended the plugin's shared Flickr pacing to cover original-file downloads as well as REST API requests, reducing bursty request patterns that can trigger `429` responses.
+- Added bounded retry/backoff for Flickr original downloads that return `429 Too Many Requests`, with log entries that show the retry delay and attempt number.
+- Updated sync behavior/docs so `Run Now` failures surface Flickr throttling more explicitly.
 
 = 0.13.0 =
 

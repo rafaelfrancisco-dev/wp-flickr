@@ -15,12 +15,14 @@ class WP_Flickr_Portfolio_API {
 	const MAX_REQUEST_ATTEMPTS = 3;
 
 	/**
-	 * Conservative delay between uncached Flickr REST requests.
+	 * Conservative delay between Flickr requests made by this plugin.
 	 *
 	 * Flickr documents a shared limit of 3600 queries per hour per API key,
-	 * so sync jobs should avoid bursty traffic even when retries are needed.
+	 * and original-file imports can also trigger throttling when requests are
+	 * fired too close together, so the plugin spaces both REST and media-import
+	 * traffic through the same shared slot.
 	 */
-	const REQUEST_PACE_INTERVAL = 2;
+	const REQUEST_PACE_INTERVAL = 3;
 
 	/**
 	 * Maximum Retry-After delay we will honor in a synchronous request.
@@ -125,6 +127,26 @@ class WP_Flickr_Portfolio_API {
 		);
 
 		return $payload;
+	}
+
+	/**
+	 * Wait until the next shared Flickr request slot is available.
+	 *
+	 * @return void
+	 */
+	public function pace_flickr_request() {
+		$this->pace_request();
+	}
+
+	/**
+	 * Calculate a bounded retry delay for a Flickr rate-limit header value.
+	 *
+	 * @param string|int $retry_after Retry-After header value.
+	 * @param int        $attempt Attempt number starting at 1.
+	 * @return int
+	 */
+	public function rate_limit_retry_delay_from_header( $retry_after, $attempt ) {
+		return $this->bounded_retry_delay( $retry_after, $attempt );
 	}
 
 	/**
@@ -707,7 +729,17 @@ class WP_Flickr_Portfolio_API {
 	 * @return int
 	 */
 	private function rate_limit_retry_delay( $response, $attempt ) {
-		$retry_after = wp_remote_retrieve_header( $response, 'retry-after' );
+		return $this->bounded_retry_delay( wp_remote_retrieve_header( $response, 'retry-after' ), $attempt );
+	}
+
+	/**
+	 * Calculate a bounded retry delay for Flickr rate limits.
+	 *
+	 * @param string|int $retry_after Retry-After header value.
+	 * @param int        $attempt Attempt number starting at 1.
+	 * @return int
+	 */
+	private function bounded_retry_delay( $retry_after, $attempt ) {
 		if ( is_string( $retry_after ) && '' !== trim( $retry_after ) ) {
 			$retry_after = trim( $retry_after );
 
@@ -721,7 +753,7 @@ class WP_Flickr_Portfolio_API {
 			}
 		}
 
-		$delays = array( 2, 5, 10 );
+		$delays = array( 3, 6, 12 );
 		$index  = min( max( 0, $attempt - 1 ), count( $delays ) - 1 );
 
 		return $delays[ $index ];

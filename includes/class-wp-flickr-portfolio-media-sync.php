@@ -20,7 +20,17 @@ class WP_Flickr_Portfolio_Media_Sync {
 	const IMPORT_DOWNLOAD_REDIRECTS = 5;
 
 	/**
-	 * Legacy manual run-now cron hook kept for already queued events.
+	 * Number of photos to process in one background worker batch.
+	 */
+	const SCHEDULE_BATCH_SIZE = 3;
+
+	/**
+	 * Maximum number of deferred retries after Flickr rate limits an original download.
+	 */
+	const MAX_RATE_LIMIT_RESCHEDULES = 6;
+
+	/**
+	 * Background worker cron hook for queued scheduled-source batches.
 	 */
 	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
 
@@ -71,7 +81,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		add_action( 'admin_post_wpfp_remove_scheduled_source', array( $this, 'handle_remove_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_toggle_scheduled_source', array( $this, 'handle_toggle_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_run_scheduled_source', array( $this, 'handle_run_scheduled_source' ) );
-		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
+		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_scheduled_source_worker' ), 10, 1 );
 		add_action( self::CRON_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
 		add_filter( 'cron_schedules', array( __CLASS__, 'register_cron_schedules' ) );
 	}
@@ -459,31 +469,39 @@ class WP_Flickr_Portfolio_Media_Sync {
 		$base_key = isset( $_GET['base_key'] ) ? sanitize_text_field( wp_unslash( $_GET['base_key'] ) ) : '';
 		check_admin_referer( 'wpfp_run_scheduled_source_' . $base_key );
 
-		$result = $this->run_scheduled_source( $base_key );
+		$result = $this->queue_scheduled_source_run( $base_key, 'manual' );
 		if ( is_wp_error( $result ) ) {
 			$this->logger->warning( 'media_sync', $result->get_error_message(), array( 'base_key' => $base_key, 'code' => $result->get_error_code() ), 'schedule_run_error' );
 			$this->redirect_with_notice( 'schedule_error', $result->get_error_message() );
 		}
 
-		$this->redirect_with_notice(
-			'schedule_run_complete',
-			sprintf(
-				/* translators: 1: synced pages, 2: total pages. */
-				__( 'Synced %1$d of %2$d pages.', 'wp-flickr-portfolio' ),
-				absint( $result['pages_synced'] ?? 0 ),
-				absint( $result['total_pages'] ?? 0 )
-			)
-		);
+		$this->redirect_with_notice( 'schedule_run_queued' );
 	}
 
 	/**
-	 * Handle scheduled cron runs.
+	 * Handle recurring scheduled cron runs by queueing a background worker.
 	 *
 	 * @param string $base_key Scheduled source key.
 	 * @return void
 	 */
 	public function handle_cron_scheduled_source( $base_key ) {
-		$this->run_scheduled_source( (string) $base_key );
+		$result = $this->queue_scheduled_source_run( (string) $base_key, 'schedule' );
+		if ( is_wp_error( $result ) && 'wpfp_schedule_running' !== $result->get_error_code() ) {
+			$this->logger->error( 'media_sync', $result->get_error_message(), array( 'base_key' => (string) $base_key, 'code' => $result->get_error_code() ), 'schedule_queue_failed' );
+		}
+	}
+
+	/**
+	 * Handle one queued background batch for a scheduled source.
+	 *
+	 * @param string $base_key Scheduled source key.
+	 * @return void
+	 */
+	public function handle_scheduled_source_worker( $base_key ) {
+		$result = $this->process_scheduled_source_batch( (string) $base_key );
+		if ( is_wp_error( $result ) ) {
+			$this->logger->error( 'media_sync', $result->get_error_message(), array( 'base_key' => (string) $base_key, 'code' => $result->get_error_code() ), 'schedule_worker_failed' );
+		}
 	}
 
 	/**
@@ -996,7 +1014,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		);
 
 		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
-
+		$this->api->pace_flickr_request();
 		$result = $this->download_with_wordpress_http( $requested_url, $temp_file );
 		if ( is_wp_error( $result ) && function_exists( 'curl_init' ) ) {
 			$this->cleanup_import_temp_file( $temp_file );
@@ -1012,6 +1030,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 				),
 				'import_transport_retry'
 			);
+			$this->api->pace_flickr_request();
 			$result = $this->download_with_curl( $requested_url, $temp_file );
 		}
 
@@ -1020,11 +1039,11 @@ class WP_Flickr_Portfolio_Media_Sync {
 			return $result;
 		}
 
-		$result['tmp_name']   = $temp_file;
-		$result['file_name']  = $file_name;
-		$result['photo_id']   = $photo_id;
+		$result['tmp_name']      = $temp_file;
+		$result['file_name']     = $file_name;
+		$result['photo_id']      = $photo_id;
 		$result['requested_url'] = $requested_url;
-		$result['variant']    = $import_variant;
+		$result['variant']       = $import_variant;
 
 		$this->logger->info(
 			'media_sync',
@@ -1032,6 +1051,35 @@ class WP_Flickr_Portfolio_Media_Sync {
 			$this->download_log_context( $result ),
 			'import_http_response'
 		);
+
+		if ( $this->is_rate_limited_download( $result ) ) {
+			$retry_delay = $this->download_rate_limit_retry_delay( $result );
+			$this->logger->warning(
+				'media_sync',
+				'Flickr original download hit a rate limit.',
+				array_merge(
+					$this->download_log_context( $result ),
+					array(
+						'retry_after' => $retry_delay,
+					)
+				),
+				'import_rate_limited'
+			);
+			$this->cleanup_import_temp_file( $temp_file );
+
+			return new WP_Error(
+				'wpfp_original_transport_rate_limited',
+				sprintf(
+					/* translators: %d: seconds until retry. */
+					__( 'Flickr rate limit reached while downloading the original file. Retrying in about %d seconds.', 'wp-flickr-portfolio' ),
+					$retry_delay
+				),
+				array(
+					'retry_after' => $retry_delay,
+					'photo_id'    => $photo_id,
+				)
+			);
+		}
 
 		$validation = $this->validate_import_download( $result );
 		if ( is_wp_error( $validation ) ) {
@@ -1097,6 +1145,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 			'response_code'   => absint( wp_remote_retrieve_response_code( $response ) ),
 			'content_type'    => (string) wp_remote_retrieve_header( $response, 'content-type' ),
 			'content_length'  => absint( wp_remote_retrieve_header( $response, 'content-length' ) ),
+			'retry_after'     => (string) wp_remote_retrieve_header( $response, 'retry-after' ),
 			'final_url'       => $this->extract_final_response_url( $response, $url ),
 			'bytes_written'   => file_exists( $temp_file ) ? (int) @filesize( $temp_file ) : 0,
 		);
@@ -1187,6 +1236,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 			'response_code'  => $code,
 			'content_type'   => $content_type,
 			'content_length' => $content_length,
+			'retry_after'    => isset( $response_headers['retry-after'] ) ? (string) $response_headers['retry-after'] : '',
 			'final_url'      => $final_url,
 			'bytes_written'  => file_exists( $temp_file ) ? (int) @filesize( $temp_file ) : 0,
 		);
@@ -1344,10 +1394,31 @@ class WP_Flickr_Portfolio_Media_Sync {
 			'response_code'  => isset( $download['response_code'] ) ? absint( $download['response_code'] ) : 0,
 			'content_type'   => isset( $download['content_type'] ) ? (string) $download['content_type'] : '',
 			'content_length' => isset( $download['content_length'] ) ? absint( $download['content_length'] ) : 0,
+			'retry_after'    => isset( $download['retry_after'] ) ? (string) $download['retry_after'] : '',
 			'bytes_written'  => isset( $download['bytes_written'] ) ? absint( $download['bytes_written'] ) : 0,
 			'file_name'      => isset( $download['file_name'] ) ? (string) $download['file_name'] : '',
 			'transport'      => isset( $download['transport'] ) ? (string) $download['transport'] : '',
 		);
+	}
+
+	/**
+	 * Determine whether a download response hit Flickr throttling.
+	 *
+	 * @param array<string,mixed> $download Download result.
+	 * @return bool
+	 */
+	private function is_rate_limited_download( array $download ) {
+		return 429 === absint( $download['response_code'] ?? 0 );
+	}
+
+	/**
+	 * Calculate a bounded retry delay for a throttled Flickr download.
+	 *
+	 * @param array<string,mixed> $download Download result.
+	 * @return int
+	 */
+	private function download_rate_limit_retry_delay( array $download ) {
+		return $this->api->rate_limit_retry_delay_from_header( (string) ( $download['retry_after'] ?? '' ), 1 );
 	}
 
 	/**
@@ -1502,12 +1573,55 @@ class WP_Flickr_Portfolio_Media_Sync {
 	}
 
 	/**
-	 * Run one scheduled source.
+	 * Queue a scheduled source to continue in the background.
+	 *
+	 * @param string $base_key Source key.
+	 * @param string $trigger Trigger label for logging.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function queue_scheduled_source_run( $base_key, $trigger = 'manual' ) {
+		if ( ! $base_key ) {
+			return new WP_Error( 'wpfp_missing_schedule_key', __( 'Missing scheduled source key.', 'wp-flickr-portfolio' ) );
+		}
+
+		$records = $this->get_scheduled_sources();
+		if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
+			return new WP_Error( 'wpfp_missing_schedule_source', __( 'Scheduled source not found.', 'wp-flickr-portfolio' ) );
+		}
+
+		$record = $records[ $base_key ];
+		if ( 'schedule' === $trigger && empty( $record['enabled'] ) ) {
+			return array(
+				'status' => 'ignored',
+			);
+		}
+
+		if ( in_array( (string) ( $record['last_status'] ?? '' ), array( 'queued', 'running' ), true ) ) {
+			return new WP_Error( 'wpfp_schedule_running', __( 'This scheduled source is already running.', 'wp-flickr-portfolio' ) );
+		}
+
+		$record                  = $this->reset_scheduled_progress( $record );
+		$record['last_status']   = 'queued';
+		$record['last_message']  = __( 'Queued to run in the background.', 'wp-flickr-portfolio' );
+		$record['last_run_at']   = time();
+		$records[ $base_key ]    = $record;
+		$this->save_scheduled_sources( $records );
+		$this->schedule_source_worker( $base_key, 0 );
+		$this->trigger_background_worker();
+		$this->logger->info( 'media_sync', 'Scheduled source queued for background sync.', array( 'base_key' => $base_key, 'trigger' => $trigger ), 'schedule_queued' );
+
+		return array(
+			'status' => 'queued',
+		);
+	}
+
+	/**
+	 * Process one background batch for a scheduled source.
 	 *
 	 * @param string $base_key Source key.
 	 * @return array<string,mixed>|\WP_Error
 	 */
-	private function run_scheduled_source( $base_key ) {
+	private function process_scheduled_source_batch( $base_key ) {
 		if ( ! $base_key ) {
 			return new WP_Error( 'wpfp_missing_schedule_key', __( 'Missing scheduled source key.', 'wp-flickr-portfolio' ) );
 		}
@@ -1520,59 +1634,334 @@ class WP_Flickr_Portfolio_Media_Sync {
 		set_transient( $lock_key, time(), self::SCHEDULE_LOCK_TTL );
 		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
 
-		$records = $this->get_scheduled_sources();
 		try {
+			$records = $this->get_scheduled_sources();
 			if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
 				return new WP_Error( 'wpfp_missing_schedule_source', __( 'Scheduled source not found.', 'wp-flickr-portfolio' ) );
 			}
 
-			$records[ $base_key ]['last_status']  = 'running';
-			$records[ $base_key ]['last_message'] = __( 'Running sync.', 'wp-flickr-portfolio' );
-			$this->save_scheduled_sources( $records );
-			$this->logger->info( 'media_sync', 'Scheduled source sync started.', array( 'base_key' => $base_key ), 'schedule_running' );
-
 			$record = $records[ $base_key ];
-			$source = array(
-				'source'         => isset( $record['source'] ) ? (string) $record['source'] : 'photoset',
-				'user_id'        => isset( $record['user_id'] ) ? (string) $record['user_id'] : '',
-				'photoset_id'    => isset( $record['photoset_id'] ) ? (string) $record['photoset_id'] : '',
-				'per_page'       => isset( $record['per_page'] ) ? absint( $record['per_page'] ) : 24,
-				'page'           => 1,
-				'privacy_filter' => isset( $record['privacy_filter'] ) ? absint( $record['privacy_filter'] ) : 1,
-			);
+			$record['last_status']  = 'running';
+			$record['last_message'] = $this->build_progress_message( $record, __( 'Starting background sync.', 'wp-flickr-portfolio' ) );
+			$records[ $base_key ]   = $record;
+			$this->save_scheduled_sources( $records );
+			$this->logger->info( 'media_sync', 'Scheduled source batch started.', array( 'base_key' => $base_key ), 'schedule_running' );
 
-			$result = $this->sync_all_pages(
-				$source,
-				array(
-					'refresh_existing' => ! empty( $record['refresh_existing'] ),
-				)
-			);
+			$page               = max( 1, absint( $record['progress_current_page'] ?? 1 ) );
+			$current_index      = max( 0, absint( $record['progress_current_index'] ?? 0 ) );
+			$source             = $this->scheduled_source_args( $record, $page );
+			$should_bypass_cache = 0 === absint( $record['progress_processed_items'] ?? 0 ) && 0 === absint( $record['progress_rate_limit_attempts'] ?? 0 );
+			$gallery            = $this->api->get_gallery_data( $source, $should_bypass_cache );
 
-			if ( is_wp_error( $result ) ) {
-				$records[ $base_key ]['last_run_at'] = time();
-				$records[ $base_key ]['last_status'] = 'error';
-				$records[ $base_key ]['last_message'] = $result->get_error_message();
-				$this->save_scheduled_sources( $records );
-				$this->logger->error( 'media_sync', $result->get_error_message(), array( 'base_key' => $base_key, 'code' => $result->get_error_code() ), 'schedule_failed' );
-				return $result;
+			if ( is_wp_error( $gallery ) ) {
+				return $this->mark_scheduled_source_failed( $base_key, $gallery );
 			}
 
-			$records[ $base_key ]['last_run_at'] = time();
-			$records[ $base_key ]['last_status'] = 'success';
-			$records[ $base_key ]['last_pages_synced'] = absint( $result['pages_synced'] ?? 0 );
-			$records[ $base_key ]['last_total_pages'] = absint( $result['total_pages'] ?? 0 );
-			$records[ $base_key ]['last_message'] = sprintf(
-				/* translators: 1: synced pages, 2: total pages. */
-				__( 'Synced %1$d of %2$d pages.', 'wp-flickr-portfolio' ),
-				absint( $result['pages_synced'] ?? 0 ),
-				absint( $result['total_pages'] ?? 0 )
-			);
-			$this->save_scheduled_sources( $records );
-			$this->logger->info( 'media_sync', 'Scheduled source sync completed.', array( 'base_key' => $base_key, 'pages_synced' => absint( $result['pages_synced'] ?? 0 ), 'total_pages' => absint( $result['total_pages'] ?? 0 ) ), 'schedule_complete' );
+			$record['progress_total_pages'] = isset( $gallery['pages'] ) ? max( 1, absint( $gallery['pages'] ) ) : max( 1, absint( $record['progress_total_pages'] ?? 1 ) );
+			$record['progress_total_items'] = isset( $gallery['total'] ) ? max( count( $gallery['photos'] ?? array() ), absint( $gallery['total'] ) ) : max( absint( $record['progress_total_items'] ?? 0 ), count( $gallery['photos'] ?? array() ) );
 
-			return $result;
+			$photos = isset( $gallery['photos'] ) && is_array( $gallery['photos'] ) ? array_values( $gallery['photos'] ) : array();
+			if ( empty( $photos ) ) {
+				return $this->mark_scheduled_source_failed( $base_key, new WP_Error( 'wpfp_empty_sync', __( 'No Flickr photos were returned for this source.', 'wp-flickr-portfolio' ) ) );
+			}
+
+			$collection_key = $this->api->build_collection_key( isset( $gallery['source'] ) && is_array( $gallery['source'] ) ? $gallery['source'] : $source );
+			$source_key     = isset( $gallery['source_key'] ) ? (string) $gallery['source_key'] : $this->api->build_source_key( $source );
+			$limit          = self::SCHEDULE_BATCH_SIZE;
+			$processed_now  = 0;
+
+			while ( $processed_now < $limit && isset( $photos[ $current_index ] ) && is_array( $photos[ $current_index ] ) ) {
+				$photo                           = $photos[ $current_index ];
+				$record['progress_current_photo_id'] = isset( $photo['id'] ) ? (string) $photo['id'] : '';
+				$records[ $base_key ]            = $record;
+				$this->save_scheduled_sources( $records );
+
+				$import_result = $this->sync_gallery_photo(
+					isset( $gallery['source'] ) && is_array( $gallery['source'] ) ? $gallery['source'] : $source,
+					$collection_key,
+					$source_key,
+					$page,
+					$photo,
+					$current_index,
+					! empty( $record['refresh_existing'] ),
+					true
+				);
+
+				if ( is_wp_error( $import_result ) ) {
+					if ( 'wpfp_original_transport_rate_limited' === $import_result->get_error_code() ) {
+						return $this->reschedule_scheduled_source_after_rate_limit( $base_key, $record, $import_result );
+					}
+
+					return $this->mark_scheduled_source_failed( $base_key, $import_result );
+				}
+
+				$record['progress_processed_items'] = absint( $record['progress_processed_items'] ?? 0 ) + 1;
+				$record['progress_rate_limit_attempts'] = 0;
+				if ( 'created' === ( $import_result['status'] ?? '' ) ) {
+					$record['progress_created'] = absint( $record['progress_created'] ?? 0 ) + 1;
+				} elseif ( 'updated' === ( $import_result['status'] ?? '' ) ) {
+					$record['progress_updated'] = absint( $record['progress_updated'] ?? 0 ) + 1;
+				} else {
+					$record['progress_reused'] = absint( $record['progress_reused'] ?? 0 ) + 1;
+				}
+
+				$current_index++;
+				$processed_now++;
+			}
+
+			if ( $current_index >= count( $photos ) ) {
+				$record['progress_pages_synced'] = max( absint( $record['progress_pages_synced'] ?? 0 ), $page );
+				$page++;
+				$current_index = 0;
+			}
+
+			$record['progress_current_page']  = $page;
+			$record['progress_current_index'] = $current_index;
+			$record['progress_current_photo_id'] = '';
+			$records[ $base_key ]             = $record;
+
+			if ( $page > absint( $record['progress_total_pages'] ?? 1 ) ) {
+				$record['last_run_at']          = time();
+				$record['last_status']          = 'success';
+				$record['last_pages_synced']    = absint( $record['progress_total_pages'] ?? 0 );
+				$record['last_total_pages']     = absint( $record['progress_total_pages'] ?? 0 );
+				$record['last_message']         = sprintf(
+					/* translators: 1: synced pages, 2: total pages. */
+					__( 'Synced %1$d of %2$d pages.', 'wp-flickr-portfolio' ),
+					absint( $record['progress_total_pages'] ?? 0 ),
+					absint( $record['progress_total_pages'] ?? 0 )
+				);
+				$records[ $base_key ]           = $record;
+				$this->save_scheduled_sources( $records );
+				$this->logger->info(
+					'media_sync',
+					'Scheduled source sync completed.',
+					array(
+						'base_key'     => $base_key,
+						'pages_synced' => absint( $record['last_pages_synced'] ?? 0 ),
+						'total_pages'  => absint( $record['last_total_pages'] ?? 0 ),
+						'photos'       => absint( $record['progress_processed_items'] ?? 0 ),
+					),
+					'schedule_complete'
+				);
+
+				return array(
+					'status'      => 'success',
+					'pages_synced' => absint( $record['last_pages_synced'] ?? 0 ),
+					'total_pages' => absint( $record['last_total_pages'] ?? 0 ),
+				);
+			}
+
+			$record['last_status']  = 'queued';
+			$record['last_message'] = $this->build_progress_message( $record, __( 'Continuing in the background.', 'wp-flickr-portfolio' ) );
+			$records[ $base_key ]   = $record;
+			$this->save_scheduled_sources( $records );
+			$this->schedule_source_worker( $base_key, 0 );
+			$this->trigger_background_worker();
+			$this->logger->info(
+				'media_sync',
+				'Scheduled source batch completed and queued the next batch.',
+				array(
+					'base_key'   => $base_key,
+					'next_page'  => $page,
+					'next_index' => $current_index,
+					'processed'  => absint( $record['progress_processed_items'] ?? 0 ),
+					'total'      => absint( $record['progress_total_items'] ?? 0 ),
+				),
+				'schedule_progress'
+			);
+
+			return array(
+				'status' => 'queued',
+			);
 		} finally {
 			delete_transient( $lock_key );
+		}
+	}
+
+	/**
+	 * Build normalized source arguments for a scheduled source record.
+	 *
+	 * @param array<string,mixed> $record Source record.
+	 * @param int                 $page Flickr page to fetch.
+	 * @return array<string,mixed>
+	 */
+	private function scheduled_source_args( array $record, $page ) {
+		return array(
+			'source'         => isset( $record['source'] ) ? (string) $record['source'] : 'photoset',
+			'user_id'        => isset( $record['user_id'] ) ? (string) $record['user_id'] : '',
+			'photoset_id'    => isset( $record['photoset_id'] ) ? (string) $record['photoset_id'] : '',
+			'per_page'       => isset( $record['per_page'] ) ? absint( $record['per_page'] ) : 24,
+			'page'           => max( 1, absint( $page ) ),
+			'privacy_filter' => isset( $record['privacy_filter'] ) ? absint( $record['privacy_filter'] ) : 1,
+		);
+	}
+
+	/**
+	 * Reset persisted progress state for a scheduled source.
+	 *
+	 * @param array<string,mixed> $record Scheduled source record.
+	 * @return array<string,mixed>
+	 */
+	private function reset_scheduled_progress( array $record ) {
+		$record['progress_started_at']      = time();
+		$record['progress_current_page']    = 1;
+		$record['progress_current_index']   = 0;
+		$record['progress_pages_synced']    = 0;
+		$record['progress_total_pages']     = 0;
+		$record['progress_total_items']     = 0;
+		$record['progress_processed_items'] = 0;
+		$record['progress_created']         = 0;
+		$record['progress_updated']         = 0;
+		$record['progress_reused']          = 0;
+		$record['progress_rate_limit_attempts'] = 0;
+		$record['progress_current_photo_id'] = '';
+
+		return $record;
+	}
+
+	/**
+	 * Mark a scheduled source as failed and persist the failure message.
+	 *
+	 * @param string    $base_key Source key.
+	 * @param \WP_Error $error Failure.
+	 * @return \WP_Error
+	 */
+	private function mark_scheduled_source_failed( $base_key, WP_Error $error ) {
+		$records = $this->get_scheduled_sources();
+		if ( ! empty( $records[ $base_key ] ) && is_array( $records[ $base_key ] ) ) {
+			$records[ $base_key ]['last_run_at']  = time();
+			$records[ $base_key ]['last_status']  = 'error';
+			$records[ $base_key ]['last_message'] = $error->get_error_message();
+			$this->save_scheduled_sources( $records );
+		}
+
+		$this->logger->error( 'media_sync', $error->get_error_message(), array( 'base_key' => $base_key, 'code' => $error->get_error_code() ), 'schedule_failed' );
+		return $error;
+	}
+
+	/**
+	 * Reschedule a scheduled source after Flickr rate limiting.
+	 *
+	 * @param string    $base_key Source key.
+	 * @param array     $record Scheduled source record.
+	 * @param \WP_Error $error Rate-limit error.
+	 * @return array<string,mixed>
+	 */
+	private function reschedule_scheduled_source_after_rate_limit( $base_key, array $record, WP_Error $error ) {
+		$error_data                   = $error->get_error_data();
+		$error_data                   = is_array( $error_data ) ? $error_data : array();
+		$attempts                     = absint( $record['progress_rate_limit_attempts'] ?? 0 ) + 1;
+		$record['progress_rate_limit_attempts'] = $attempts;
+		$retry_delay                  = $this->scheduled_rate_limit_delay( $error_data, $attempts );
+		$photo_id                     = (string) ( $error_data['photo_id'] ?? ( $record['progress_current_photo_id'] ?? '' ) );
+
+		if ( $attempts > self::MAX_RATE_LIMIT_RESCHEDULES ) {
+			return $this->mark_scheduled_source_failed(
+				$base_key,
+				new WP_Error(
+					'wpfp_original_transport_rate_limited_persistent',
+					sprintf(
+						/* translators: 1: Flickr photo ID, 2: number of deferred retries. */
+						__( 'Flickr kept throttling original downloads for photo %1$s after %2$d deferred retries. This host may be blocked from server-side original fetches.', 'wp-flickr-portfolio' ),
+						$photo_id ? $photo_id : __( 'unknown', 'wp-flickr-portfolio' ),
+						$attempts - 1
+					)
+				)
+			);
+		}
+
+		$record['last_status']        = 'queued';
+		$record['last_message']       = sprintf(
+			/* translators: 1: Flickr photo ID, 2: seconds until retry, 3: deferred retry attempt. */
+			__( 'Flickr asked to slow down on photo %1$s. Retrying in %2$d seconds (attempt %3$d).', 'wp-flickr-portfolio' ),
+			$photo_id ? $photo_id : __( 'unknown', 'wp-flickr-portfolio' ),
+			$retry_delay,
+			$attempts
+		);
+
+		$records            = $this->get_scheduled_sources();
+		$records[ $base_key ] = $record;
+		$this->save_scheduled_sources( $records );
+		$this->schedule_source_worker( $base_key, $retry_delay );
+		$this->trigger_background_worker();
+		$this->logger->warning( 'media_sync', $error->get_error_message(), array( 'base_key' => $base_key, 'photo_id' => $photo_id, 'retry_after' => $retry_delay, 'attempt' => $attempts ), 'schedule_rate_limited' );
+
+		return array(
+			'status'      => 'queued',
+			'retry_after' => $retry_delay,
+		);
+	}
+
+	/**
+	 * Calculate the next background delay after Flickr throttles a source.
+	 *
+	 * @param array<string,mixed> $error_data Rate-limit error data.
+	 * @param int                 $attempt Deferred retry attempt number starting at 1.
+	 * @return int
+	 */
+	private function scheduled_rate_limit_delay( array $error_data, $attempt ) {
+		$hint   = max( 1, absint( $error_data['retry_after'] ?? 0 ) );
+		$delays = array( 30, 60, 120, 300, 600, 900 );
+		$index  = min( max( 0, absint( $attempt ) - 1 ), count( $delays ) - 1 );
+
+		return max( $hint, $delays[ $index ] );
+	}
+
+	/**
+	 * Build a compact background-progress message for the UI.
+	 *
+	 * @param array<string,mixed> $record Scheduled source record.
+	 * @param string              $suffix Message suffix.
+	 * @return string
+	 */
+	private function build_progress_message( array $record, $suffix ) {
+		$processed = absint( $record['progress_processed_items'] ?? 0 );
+		$total     = absint( $record['progress_total_items'] ?? 0 );
+
+		if ( $total > 0 ) {
+			return sprintf(
+				/* translators: 1: processed photos, 2: total photos, 3: suffix message. */
+				__( 'Processed %1$d of %2$d photos. %3$s', 'wp-flickr-portfolio' ),
+				$processed,
+				$total,
+				$suffix
+			);
+		}
+
+		return (string) $suffix;
+	}
+
+	/**
+	 * Schedule one background worker run for a source.
+	 *
+	 * @param string $base_key Source key.
+	 * @param int    $delay Delay in seconds.
+	 * @return void
+	 */
+	private function schedule_source_worker( $base_key, $delay ) {
+		$delay     = max( 0, absint( $delay ) );
+		$timestamp = wp_next_scheduled( self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
+		while ( $timestamp ) {
+			wp_unschedule_event( $timestamp, self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
+			$timestamp = wp_next_scheduled( self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
+		}
+
+		wp_schedule_single_event( time() + $delay, self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
+	}
+
+	/**
+	 * Ask WordPress to trigger queued cron work without blocking the admin page.
+	 *
+	 * @return void
+	 */
+	private function trigger_background_worker() {
+		if ( ! function_exists( 'spawn_cron' ) ) {
+			require_once ABSPATH . WPINC . '/cron.php';
+		}
+
+		if ( function_exists( 'spawn_cron' ) ) {
+			spawn_cron( time() );
 		}
 	}
 

@@ -293,6 +293,7 @@ class WP_Flickr_Portfolio_Settings {
 			'[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]',
 		);
 		$scheduled_sources = $this->get_scheduled_sources();
+		$has_active_sync   = $this->has_active_scheduled_sources( $scheduled_sources );
 		$source_defaults   = array(
 			'source'         => 'photoset',
 			'user_id'        => (string) $options['user_nsid'],
@@ -305,6 +306,13 @@ class WP_Flickr_Portfolio_Settings {
 		<div class="wrap">
 			<h1><?php esc_html_e( 'WP Flickr Portfolio', 'wp-flickr-portfolio' ); ?></h1>
 			<?php $this->render_notice(); ?>
+			<?php if ( $has_active_sync ) : ?>
+				<script>
+					window.setTimeout(function () {
+						window.location.reload();
+					}, 5000);
+				</script>
+			<?php endif; ?>
 
 			<form method="post" action="options.php">
 				<?php settings_fields( 'wpfp_settings_group' ); ?>
@@ -398,7 +406,10 @@ class WP_Flickr_Portfolio_Settings {
 			<hr>
 
 			<h2><?php esc_html_e( 'Scheduled Sync', 'wp-flickr-portfolio' ); ?></h2>
-			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a scheduled WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached sync requests and executes Run Now immediately in the current admin request.', 'wp-flickr-portfolio' ); ?></p>
+			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a scheduled WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached REST and original-file download requests, retries bounded 429 responses, and runs queued imports in the background.', 'wp-flickr-portfolio' ); ?></p>
+			<?php if ( $has_active_sync ) : ?>
+				<p class="description"><?php esc_html_e( 'This page refreshes automatically while a scheduled sync is queued or running so progress stays current.', 'wp-flickr-portfolio' ); ?></p>
+			<?php endif; ?>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="wpfp_save_scheduled_source">
 				<?php wp_nonce_field( 'wpfp_save_scheduled_source' ); ?>
@@ -455,7 +466,7 @@ class WP_Flickr_Portfolio_Settings {
 								<td><?php echo esc_html( WP_Flickr_Portfolio_Media_Sync::get_schedule_label( $record['schedule'] ?? '' ) ); ?></td>
 								<td><?php echo ! empty( $record['refresh_existing'] ) ? esc_html__( 'Yes', 'wp-flickr-portfolio' ) : esc_html__( 'No', 'wp-flickr-portfolio' ); ?></td>
 								<td><?php echo esc_html( $this->format_last_run( $record ) ); ?></td>
-								<td><?php echo esc_html( $this->format_status( $record ) ); ?></td>
+								<td><?php $this->render_status_cell( $record ); ?></td>
 								<td>
 									<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_run_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_run_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Run Now', 'wp-flickr-portfolio' ); ?></a>
 									<?php if ( ! empty( $record['enabled'] ) ) : ?>
@@ -862,6 +873,26 @@ class WP_Flickr_Portfolio_Settings {
 	}
 
 	/**
+	 * Determine whether any scheduled source is queued or running.
+	 *
+	 * @param array<int|string,array<string,mixed>> $scheduled_sources Scheduled source records.
+	 * @return bool
+	 */
+	private function has_active_scheduled_sources( array $scheduled_sources ) {
+		foreach ( $scheduled_sources as $record ) {
+			if ( ! is_array( $record ) ) {
+				continue;
+			}
+
+			if ( in_array( (string) ( $record['last_status'] ?? '' ), array( 'queued', 'running' ), true ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * Format status text for a scheduled source.
 	 *
 	 * @param array<string,mixed> $record Source record.
@@ -883,6 +914,40 @@ class WP_Flickr_Portfolio_Settings {
 		}
 
 		return $state;
+	}
+
+	/**
+	 * Render the scheduled-source status cell, including progress when available.
+	 *
+	 * @param array<string,mixed> $record Source record.
+	 * @return void
+	 */
+	private function render_status_cell( array $record ) {
+		$status = $this->format_status( $record );
+		echo '<div>' . esc_html( $status ) . '</div>';
+
+		$total     = absint( $record['progress_total_items'] ?? 0 );
+		$processed = absint( $record['progress_processed_items'] ?? 0 );
+		if ( $total <= 0 ) {
+			return;
+		}
+
+		$percent = min( 100, max( 0, (int) floor( ( $processed / $total ) * 100 ) ) );
+		$detail  = sprintf(
+			/* translators: 1: progress percent, 2: processed photos, 3: total photos. */
+			__( '%1$d%% · %2$d/%3$d photos', 'wp-flickr-portfolio' ),
+			$percent,
+			$processed,
+			$total
+		);
+		?>
+		<div style="margin-top:6px;max-width:240px;">
+			<div aria-hidden="true" style="height:8px;background:#dcdcde;border-radius:999px;overflow:hidden;">
+				<div style="height:100%;width:<?php echo esc_attr( (string) $percent ); ?>%;background:#2271b1;"></div>
+			</div>
+			<div style="margin-top:4px;font-size:12px;color:#50575e;"><?php echo esc_html( $detail ); ?></div>
+		</div>
+		<?php
 	}
 
 	/**
@@ -925,7 +990,7 @@ class WP_Flickr_Portfolio_Settings {
 				$text = __( 'Scheduled source synced successfully.', 'wp-flickr-portfolio' );
 				break;
 			case 'schedule_run_queued':
-				$text = __( 'Scheduled source queued to run in the background.', 'wp-flickr-portfolio' );
+				$text = __( 'Scheduled source queued to run in the background. Progress will appear in the Scheduled Sources table.', 'wp-flickr-portfolio' );
 				break;
 			case 'logs_cleared':
 				$text = __( 'Plugin logs cleared.', 'wp-flickr-portfolio' );

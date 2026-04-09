@@ -121,6 +121,9 @@ Related options:
 
 ## Recent Notes
 
+- `0.14.1` stopped refetching the same Flickr page during deferred rate-limit retries, increased background backoff delays for repeated `429` original-download failures, and added a terminal error when throttling persists across multiple queued attempts.
+- `0.14.0` moved scheduled sync execution into resumable background batches, added persisted per-source progress for the settings UI, and changed Flickr `429` download handling from in-request retries to deferred batch rescheduling.
+- `0.13.1` extended the shared Flickr pacing window to original-file downloads, added bounded retry/backoff for `429` download responses, and improved logs so throttling attempts are visible per photo.
 - `0.13.0` replaced the original-file importer with a plugin-owned transport pipeline, added a cURL retry path after WordPress HTTP failures, and upgraded sync errors/logs to identify the exact photo and transport outcome.
 - `0.12.3` changed the admin `Run Now` action to execute in the current admin request, scheduled recurring jobs to start on their real interval, and updated notices/docs to match the new sync flow.
 - `0.12.2` increased the runtime budget for large original-file imports and added a completion log after a Flickr file finishes downloading, making cron import stalls easier to diagnose.
