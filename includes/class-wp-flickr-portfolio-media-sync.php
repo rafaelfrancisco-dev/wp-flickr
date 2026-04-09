@@ -10,6 +10,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 class WP_Flickr_Portfolio_Media_Sync {
 
 	/**
+	 * Timeout for downloading large original Flickr files.
+	 */
+	const IMPORT_DOWNLOAD_TIMEOUT = 300;
+
+	/**
 	 * Manual run-now cron hook.
 	 */
 	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
@@ -63,6 +68,78 @@ class WP_Flickr_Portfolio_Media_Sync {
 		add_action( 'admin_post_wpfp_run_scheduled_source', array( $this, 'handle_run_scheduled_source' ) );
 		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
 		add_action( self::CRON_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
+		add_filter( 'cron_schedules', array( __CLASS__, 'register_cron_schedules' ) );
+	}
+
+	/**
+	 * Return the list of valid cron schedule keys.
+	 *
+	 * @return string[]
+	 */
+	public static function get_valid_schedules() {
+		return array( 'hourly', 'twicedaily', 'daily', 'every_6_hours', 'every_12_hours', 'weekly', 'biweekly', 'monthly' );
+	}
+
+	/**
+	 * Return a human-readable label for a schedule key.
+	 *
+	 * @param string $schedule Schedule key.
+	 * @return string
+	 */
+	public static function get_schedule_label( $schedule ) {
+		$labels = array(
+			'hourly'        => __( 'Hourly', 'wp-flickr-portfolio' ),
+			'twicedaily'    => __( 'Twice Daily', 'wp-flickr-portfolio' ),
+			'daily'         => __( 'Daily', 'wp-flickr-portfolio' ),
+			'every_6_hours' => __( 'Every 6 Hours', 'wp-flickr-portfolio' ),
+			'every_12_hours' => __( 'Every 12 Hours', 'wp-flickr-portfolio' ),
+			'weekly'        => __( 'Weekly', 'wp-flickr-portfolio' ),
+			'biweekly'      => __( 'Biweekly', 'wp-flickr-portfolio' ),
+			'monthly'       => __( 'Monthly', 'wp-flickr-portfolio' ),
+		);
+
+		return isset( $labels[ $schedule ] ) ? $labels[ $schedule ] : $schedule;
+	}
+
+	/**
+	 * Register custom cron schedules.
+	 *
+	 * @param array<string,mixed> $schedules Existing schedules.
+	 * @return array<string,mixed>
+	 */
+	public static function register_cron_schedules( $schedules ) {
+		$schedules['every_6_hours'] = array(
+			'interval' => 6 * HOUR_IN_SECONDS,
+			'display'  => __( 'Every 6 Hours', 'wp-flickr-portfolio' ),
+		);
+		$schedules['every_12_hours'] = array(
+			'interval' => 12 * HOUR_IN_SECONDS,
+			'display'  => __( 'Every 12 Hours', 'wp-flickr-portfolio' ),
+		);
+		$schedules['weekly'] = array(
+			'interval' => 7 * DAY_IN_SECONDS,
+			'display'  => __( 'Weekly', 'wp-flickr-portfolio' ),
+		);
+		$schedules['biweekly'] = array(
+			'interval' => 15 * DAY_IN_SECONDS,
+			'display'  => __( 'Biweekly', 'wp-flickr-portfolio' ),
+		);
+		$schedules['monthly'] = array(
+			'interval' => 30 * DAY_IN_SECONDS,
+			'display'  => __( 'Monthly', 'wp-flickr-portfolio' ),
+		);
+
+		return $schedules;
+	}
+
+	/**
+	 * Sanitize and validate a posted schedule value.
+	 *
+	 * @return string
+	 */
+	private function sanitize_schedule() {
+		$raw = isset( $_POST['schedule'] ) ? sanitize_key( wp_unslash( $_POST['schedule'] ) ) : '';
+		return in_array( $raw, self::get_valid_schedules(), true ) ? $raw : 'daily';
 	}
 
 	/**
@@ -287,7 +364,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 				'per_page'          => absint( $source['per_page'] ),
 				'privacy_filter'    => absint( $source['privacy_filter'] ),
 				'enabled'           => true,
-				'schedule'          => 'daily',
+				'schedule'          => $this->sanitize_schedule(),
 				'refresh_existing'  => ! empty( $_POST['refresh_existing'] ),
 				'last_run_at'       => isset( $current['last_run_at'] ) ? absint( $current['last_run_at'] ) : 0,
 				'last_message'      => isset( $current['last_message'] ) ? (string) $current['last_message'] : '',
@@ -298,8 +375,9 @@ class WP_Flickr_Portfolio_Media_Sync {
 		);
 
 		$this->save_scheduled_sources( $records );
-		$this->schedule_source( $base_key, 'daily' );
-		$this->logger->info( 'media_sync', 'Scheduled source saved.', array_merge( $this->source_log_context( $source ), array( 'base_key' => $base_key, 'refresh_existing' => ! empty( $_POST['refresh_existing'] ) ) ), 'schedule_saved' );
+		$schedule = $this->sanitize_schedule();
+		$this->schedule_source( $base_key, $schedule );
+		$this->logger->info( 'media_sync', 'Scheduled source saved.', array_merge( $this->source_log_context( $source ), array( 'base_key' => $base_key, 'refresh_existing' => ! empty( $_POST['refresh_existing'] ), 'schedule' => $schedule ) ), 'schedule_saved' );
 
 		$this->redirect_with_notice( 'schedule_saved' );
 	}
@@ -726,9 +804,16 @@ class WP_Flickr_Portfolio_Media_Sync {
 			);
 		}
 
-		$prefer_original = ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'];
-		$import_source   = $this->select_import_source( $photo, $prefer_original );
+		$prefer_original        = ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'];
+		$allow_resized_fallback = array_key_exists( 'allow_resized_fallback', $options )
+			? (bool) $options['allow_resized_fallback']
+			: (bool) $this->settings->get( 'allow_resized_fallback', false );
+		$import_source          = $this->select_import_source( $photo, $prefer_original, $allow_resized_fallback );
 		if ( empty( $import_source['url'] ) ) {
+			if ( $prefer_original && ! $allow_resized_fallback ) {
+				return new WP_Error( 'wpfp_missing_original_photo_url', __( 'Flickr did not provide an original image URL for this photo.', 'wp-flickr-portfolio' ) );
+			}
+
 			return new WP_Error( 'wpfp_missing_photo_url', __( 'Flickr did not provide a downloadable image URL for this photo.', 'wp-flickr-portfolio' ) );
 		}
 
@@ -741,16 +826,18 @@ class WP_Flickr_Portfolio_Media_Sync {
 				'photo_id'       => (string) $photo['id'],
 				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
 				'url'            => $source_url,
+				'timeout'        => self::IMPORT_DOWNLOAD_TIMEOUT,
 			),
 			'import_download_start'
 		);
 
 		$this->ensure_media_import_dependencies();
+		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
 
-		$temp_file = download_url( $source_url, 60 );
+		$temp_file = download_url( $source_url, self::IMPORT_DOWNLOAD_TIMEOUT );
 
-		// If the primary URL failed and it was the original, fall back to display URL.
-		if ( is_wp_error( $temp_file ) && 'full_url' === ( $import_source['variant'] ?? '' ) && ! empty( $photo['display_url'] ) && (string) $photo['display_url'] !== $source_url ) {
+		// Optionally fall back to Flickr display sizes when the original download fails.
+		if ( is_wp_error( $temp_file ) && $allow_resized_fallback && 'full_url' === ( $import_source['variant'] ?? '' ) && ! empty( $photo['display_url'] ) && (string) $photo['display_url'] !== $source_url ) {
 			$this->logger->warning(
 				'media_sync',
 				'Flickr original download failed, retrying with display URL.',
@@ -763,13 +850,40 @@ class WP_Flickr_Portfolio_Media_Sync {
 			);
 			$source_url    = (string) $photo['display_url'];
 			$import_source = array( 'variant' => 'display_url', 'url' => $source_url );
-			$temp_file     = download_url( $source_url, 60 );
+			$temp_file     = download_url( $source_url, self::IMPORT_DOWNLOAD_TIMEOUT );
+		} elseif ( is_wp_error( $temp_file ) && 'full_url' === ( $import_source['variant'] ?? '' ) && ! $allow_resized_fallback ) {
+			$this->logger->error(
+				'media_sync',
+				'Flickr original download failed and resized fallback is disabled.',
+				array(
+					'photo_id' => (string) $photo['id'],
+					'code'     => $temp_file->get_error_code(),
+					'error'    => $temp_file->get_error_message(),
+				),
+				'original_download_required'
+			);
+
+			return new WP_Error(
+				'wpfp_original_download_required',
+				__( 'Flickr original download failed, and importing smaller fallback sizes is disabled.', 'wp-flickr-portfolio' )
+			);
 		}
 
 		if ( is_wp_error( $temp_file ) ) {
 			$this->logger->error( 'media_sync', $temp_file->get_error_message(), array( 'photo_id' => (string) $photo['id'], 'code' => $temp_file->get_error_code() ), 'download_failed' );
 			return $temp_file;
 		}
+
+		$this->logger->info(
+			'media_sync',
+			'Downloaded Flickr photo for Media Library import.',
+			array(
+				'photo_id'       => (string) $photo['id'],
+				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
+				'bytes'          => file_exists( $temp_file ) ? (int) @filesize( $temp_file ) : 0,
+			),
+			'import_download_complete'
+		);
 
 		$path      = wp_parse_url( $source_url, PHP_URL_PATH );
 		$basename  = $path ? basename( (string) $path ) : (string) $photo['id'] . '.jpg';
@@ -805,6 +919,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 
 		add_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
 		add_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
+		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
 
 		try {
 			$attachment_id = media_handle_sideload(
@@ -853,19 +968,50 @@ class WP_Flickr_Portfolio_Media_Sync {
 		}
 	}
 
+	/**
+	 * Ask PHP and WordPress for a longer runtime budget during large imports.
+	 *
+	 * @param int $seconds Desired execution window.
+	 * @return void
+	 */
+	private function prepare_long_running_runtime( $seconds ) {
+		$seconds = max( 60, absint( $seconds ) );
+
+		if ( function_exists( 'ignore_user_abort' ) ) {
+			@ignore_user_abort( true );
+		}
+
+		if ( function_exists( 'wp_raise_memory_limit' ) ) {
+			wp_raise_memory_limit( 'image' );
+		}
+
+		if ( function_exists( 'wp_set_time_limit' ) ) {
+			wp_set_time_limit( $seconds );
+			return;
+		}
+
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( $seconds );
+		}
+	}
+
 
 	/**
 	 * Pick the safest Flickr image URL variant for WordPress import work.
 	 *
-	 * Prefers the original Flickr file but falls back to display or thumbnail URL when unavailable.
+	 * Prefers the original Flickr file and only falls back to derived Flickr sizes when allowed.
 	 *
 	 * @param array<string,mixed> $photo Flickr photo payload.
 	 * @return array<string,string>
 	 */
-	private function select_import_source( array $photo, $prefer_original = true ) {
-		$candidates = $prefer_original
-			? array( 'full_url', 'display_url', 'thumbnail_url' )
-			: array( 'display_url', 'full_url', 'thumbnail_url' );
+	private function select_import_source( array $photo, $prefer_original = true, $allow_resized_fallback = false ) {
+		if ( $prefer_original && ! $allow_resized_fallback ) {
+			$candidates = array( 'full_url' );
+		} else {
+			$candidates = $prefer_original
+				? array( 'full_url', 'display_url', 'thumbnail_url' )
+				: array( 'display_url', 'full_url', 'thumbnail_url' );
+		}
 
 		foreach ( $candidates as $field ) {
 			if ( ! empty( $photo[ $field ] ) ) {
@@ -978,6 +1124,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		}
 
 		set_transient( $lock_key, time(), self::SCHEDULE_LOCK_TTL );
+		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
 
 		$records = $this->get_scheduled_sources();
 		try {

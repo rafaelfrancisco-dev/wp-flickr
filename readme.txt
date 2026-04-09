@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.12.0
+Stable tag: 0.12.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -81,6 +81,17 @@ Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database
 
 == Changelog ==
 
+= 0.12.2 =
+
+- Increased the runtime budget for large original-file imports during scheduled sync, including longer download timeouts and WordPress/PHP runtime extension requests.
+- Added an `import_download_complete` log entry so large-file imports can be diagnosed more precisely when background jobs stall.
+
+= 0.12.1 =
+
+- Changed Media Library imports to require Flickr's original file by default instead of silently falling back to a smaller display-size image.
+- Added a settings toggle to allow resized Flickr fallback imports when the original file cannot be downloaded.
+- Clarified import failure logging when the original file is unavailable and resized fallback is disabled.
+
 = 0.12.0 =
 
 - Fixed scheduled sync error handlers to write log entries before redirecting, so the Logs page always shows the reason for a failed save, remove, or toggle.
@@ -109,7 +120,6 @@ Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database
 
 = 0.7.2 =
 
-- Changed Flickr media imports to prefer the display-size URL instead of the largest original file when building WordPress attachments.
 - Disabled intermediate image-size generation during Flickr sideload imports to reduce memory/time pressure on lazy and background syncs.
 - Added info-level import-step logs for download and sideload start so import progress is visible in the Logs screen.
 

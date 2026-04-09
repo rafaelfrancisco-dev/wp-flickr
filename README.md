@@ -68,10 +68,11 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - If you only need public content, you can skip OAuth and just use a valid Flickr API key and secret.
 - Scheduled sync uses WordPress cron and runs daily for each selected source. `Run Now` queues the job into WP-Cron instead of executing the whole import in the admin request.
 - Flickr documents a shared API-key limit of `3600 queries per hour`, so uncached sync requests are paced conservatively.
-- Scheduled sync still prefer Flickr's full/original file when available, so the local full-size attachment keeps the original image bytes and any embedded EXIF that Flickr preserved in that file.
+- Scheduled sync prefers Flickr's full/original file when available, so the local full-size attachment keeps the original image bytes and any embedded EXIF that Flickr preserved in that file.
+- Media imports now require the Flickr original by default. A new admin setting can re-enable fallback to smaller Flickr display sizes if you explicitly want that behavior.
 - Attachment-backed modes are matched against the exact source configuration, including `source`, `user_id`, `photoset_id`, `per_page`, `page`, and `privacy_filter`.
 - The `Logs` admin screen keeps a rolling in-database history of recent plugin events so debugging does not depend on server log access.
-- Flickr imports now prefer the gallery display image rather than the largest available original and skip intermediate WordPress size generation, which reduces memory pressure during imports.
+- Flickr imports skip intermediate WordPress size generation and disable WordPress big-image downscaling during sideload so the original file is preserved locally.
 
 ## Gutenberg Block
 

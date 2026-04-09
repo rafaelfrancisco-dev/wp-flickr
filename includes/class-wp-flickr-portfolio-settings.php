@@ -59,6 +59,7 @@ class WP_Flickr_Portfolio_Settings {
 			'default_mode'       => 'remote',
 			'default_per_page'   => 24,
 			'default_layout'     => 'grid',
+			'allow_resized_fallback' => false,
 			'lightbox_selector'  => '.entry-content, .gallery, .mgl-gallery, .wp-block-gallery',
 		);
 	}
@@ -265,6 +266,7 @@ class WP_Flickr_Portfolio_Settings {
 			'default_mode'       => isset( $input['default_mode'] ) && in_array( $input['default_mode'], array( 'remote', 'media', 'auto', 'lazy' ), true ) ? $input['default_mode'] : $current['default_mode'],
 			'default_per_page'   => isset( $input['default_per_page'] ) ? min( 500, max( 1, absint( $input['default_per_page'] ) ) ) : (int) $current['default_per_page'],
 			'default_layout'     => isset( $input['default_layout'] ) ? $this->normalize_layout( $input['default_layout'] ) : $this->normalize_layout( $current['default_layout'] ),
+			'allow_resized_fallback' => ! empty( $input['allow_resized_fallback'] ),
 			'lightbox_selector'  => isset( $input['lightbox_selector'] ) ? sanitize_text_field( (string) $input['lightbox_selector'] ) : $current['lightbox_selector'],
 		);
 
@@ -345,6 +347,16 @@ class WP_Flickr_Portfolio_Settings {
 							</td>
 						</tr>
 						<tr>
+							<th scope="row"><label for="wpfp_allow_resized_fallback"><?php esc_html_e( 'Media import fallback', 'wp-flickr-portfolio' ); ?></label></th>
+							<td>
+								<label for="wpfp_allow_resized_fallback">
+									<input id="wpfp_allow_resized_fallback" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[allow_resized_fallback]" type="checkbox" value="1" <?php checked( ! empty( $options['allow_resized_fallback'] ) ); ?>>
+									<?php esc_html_e( 'Allow importing Flickr display-size images when the original file cannot be downloaded.', 'wp-flickr-portfolio' ); ?>
+								</label>
+								<p class="description"><?php esc_html_e( 'Leave this disabled to preserve full resolution and EXIF by requiring the original Flickr file for Media Library imports.', 'wp-flickr-portfolio' ); ?></p>
+							</td>
+						</tr>
+						<tr>
 							<th scope="row"><label for="wpfp_lightbox_selector"><?php esc_html_e( 'Expected Meow Lightbox selector', 'wp-flickr-portfolio' ); ?></label></th>
 							<td>
 								<input class="regular-text" id="wpfp_lightbox_selector" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[lightbox_selector]" type="text" value="<?php echo esc_attr( $options['lightbox_selector'] ); ?>">
@@ -386,7 +398,7 @@ class WP_Flickr_Portfolio_Settings {
 			<hr>
 
 			<h2><?php esc_html_e( 'Scheduled Sync', 'wp-flickr-portfolio' ); ?></h2>
-			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a daily WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached sync requests and runs Run Now in the background.', 'wp-flickr-portfolio' ); ?></p>
+			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a scheduled WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached sync requests and runs Run Now in the background.', 'wp-flickr-portfolio' ); ?></p>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="wpfp_save_scheduled_source">
 				<?php wp_nonce_field( 'wpfp_save_scheduled_source' ); ?>
@@ -406,7 +418,9 @@ class WP_Flickr_Portfolio_Settings {
 							<th scope="row"><label for="wpfp_scheduled_schedule"><?php esc_html_e( 'Schedule', 'wp-flickr-portfolio' ); ?></label></th>
 							<td>
 								<select id="wpfp_scheduled_schedule" name="schedule">
-									<option value="daily"><?php esc_html_e( 'Daily', 'wp-flickr-portfolio' ); ?></option>
+									<?php foreach ( WP_Flickr_Portfolio_Media_Sync::get_valid_schedules() as $key ) : ?>
+										<option value="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( WP_Flickr_Portfolio_Media_Sync::get_schedule_label( $key ) ); ?></option>
+									<?php endforeach; ?>
 								</select>
 							</td>
 						</tr>
@@ -438,7 +452,7 @@ class WP_Flickr_Portfolio_Settings {
 							<tr>
 								<td><?php echo esc_html( $this->format_source_label( $record ) ); ?></td>
 								<td><?php echo esc_html( (string) ( isset( $record['per_page'] ) ? absint( $record['per_page'] ) : 0 ) ); ?></td>
-								<td><?php echo esc_html( 'daily' === ( $record['schedule'] ?? '' ) ? __( 'Daily', 'wp-flickr-portfolio' ) : (string) ( $record['schedule'] ?? '' ) ); ?></td>
+								<td><?php echo esc_html( WP_Flickr_Portfolio_Media_Sync::get_schedule_label( $record['schedule'] ?? '' ) ); ?></td>
 								<td><?php echo ! empty( $record['refresh_existing'] ) ? esc_html__( 'Yes', 'wp-flickr-portfolio' ) : esc_html__( 'No', 'wp-flickr-portfolio' ); ?></td>
 								<td><?php echo esc_html( $this->format_last_run( $record ) ); ?></td>
 								<td><?php echo esc_html( $this->format_status( $record ) ); ?></td>

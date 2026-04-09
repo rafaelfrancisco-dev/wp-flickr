@@ -121,6 +121,8 @@ Related options:
 
 ## Recent Notes
 
+- `0.12.2` increased the runtime budget for large original-file imports and added a completion log after a Flickr file finishes downloading, making cron import stalls easier to diagnose.
+- `0.12.1` changed Media Library imports to require Flickr originals by default, added an explicit resized-fallback setting, and improved logging when an original download cannot be preserved.
 - `0.11.0` removed the Manual Media Sync and Import All Pages admin sections. These features are now available through scheduled sync: add a scheduled source and use Run Now to import on demand.
 - `0.10.0` added paginated log browsing (25 entries per page with WordPress-style pagination), log export as a downloadable text file, and removed the redundant View Logs button from the main settings page.
 - `0.9.0` removed `mode="lazy"` and all associated background-sync machinery (WP-Cron per-photo batching, lazy payload transients, original-upgrade jobs, frontend JS poller). The supported sync paths are now manual per-page sync, bulk all-pages import, and scheduled daily sync from the admin screen.

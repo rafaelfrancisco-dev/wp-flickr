@@ -3,7 +3,7 @@
  * Plugin Name: WP Flickr Portfolio
  * Plugin URI: https://github.com/rafaelfrancisco/wp-flickr
  * Description: Fetch Flickr albums and photostream images into WordPress, render remote galleries, and optionally sync media for Meow Gallery workflows.
- * Version: 0.12.0
+ * Version: 0.12.2
  * Author: Rafael Francisco
  * Text Domain: wp-flickr-portfolio
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPFLICKRPORTFOLIO_VERSION', '0.12.0' );
+define( 'WPFLICKRPORTFOLIO_VERSION', '0.12.2' );
 define( 'WPFLICKRPORTFOLIO_FILE', __FILE__ );
 define( 'WPFLICKRPORTFOLIO_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPFLICKRPORTFOLIO_URL', plugin_dir_url( __FILE__ ) );
@@ -31,11 +31,12 @@ register_activation_hook(
 	WPFLICKRPORTFOLIO_FILE,
 	static function() {
 		$defaults = array(
-			'cache_ttl'         => 900,
-			'default_mode'      => 'remote',
-			'default_per_page'  => 24,
-			'default_layout'    => 'grid',
-			'lightbox_selector' => '.entry-content, .gallery, .mgl-gallery, .wp-block-gallery',
+			'cache_ttl'               => 900,
+			'default_mode'            => 'remote',
+			'default_per_page'        => 24,
+			'default_layout'          => 'grid',
+			'allow_resized_fallback'  => false,
+			'lightbox_selector'       => '.entry-content, .gallery, .mgl-gallery, .wp-block-gallery',
 		);
 
 		$options = get_option( 'wpfp_settings', array() );
