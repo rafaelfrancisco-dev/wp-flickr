@@ -18,8 +18,6 @@ The current implementation supports:
 - Public access with API key/secret
 - Private access through Flickr OAuth 1.0a with read permissions
 - Cached Flickr responses using WordPress transients
-- Manual per-page sync from the admin UI
-- Bulk all-pages import for a Flickr source
 - Optional metadata refresh for already imported attachments
 - Optional per-source daily scheduled sync using WP-Cron
 - Rolling plugin-owned operational logs with an admin viewer
@@ -48,7 +46,7 @@ The current implementation supports:
 
 - Owns plugin settings.
 - Registers the top-level admin screen.
-- Renders admin UI for credentials, OAuth actions, cache clearing, manual sync, bulk sync, scheduled sync management, and log viewing.
+- Renders admin UI for credentials, OAuth actions, cache clearing, scheduled sync management, and log viewing.
 - Logs subpage supports paginated browsing (25 entries per page) and exporting filtered logs as a downloadable text file.
 
 `includes/class-wp-flickr-portfolio-logger.php`
@@ -79,7 +77,7 @@ The current implementation supports:
 - Loads WordPress media sideload dependencies explicitly.
 - Prefers Flickr's full/original image when available and suppresses intermediate image-size generation to keep imports within typical shared-host limits while preserving the original file bytes.
 - Stores scheduled-source records keyed by logical source.
-- Runs bulk sync jobs manually and through WP-Cron.
+- Runs bulk sync jobs through WP-Cron.
 
 `includes/class-wp-flickr-portfolio-shortcode.php`
 
@@ -123,6 +121,7 @@ Related options:
 
 ## Recent Notes
 
+- `0.11.0` removed the Manual Media Sync and Import All Pages admin sections. These features are now available through scheduled sync: add a scheduled source and use Run Now to import on demand.
 - `0.10.0` added paginated log browsing (25 entries per page with WordPress-style pagination), log export as a downloadable text file, and removed the redundant View Logs button from the main settings page.
 - `0.9.0` removed `mode="lazy"` and all associated background-sync machinery (WP-Cron per-photo batching, lazy payload transients, original-upgrade jobs, frontend JS poller). The supported sync paths are now manual per-page sync, bulk all-pages import, and scheduled daily sync from the admin screen.
 - `0.7.1` hardened frontend media imports by explicitly loading `download_url()`, `media_handle_sideload()`, and attachment metadata helpers before sideloading Flickr images. This avoids hard failures where one helper had been loaded by WordPress or another plugin but the full import stack had not.
@@ -135,8 +134,6 @@ The admin screen exposes operational actions for:
 - Disconnect Flickr
 - Clear Cached Flickr Data
 - View, filter, paginate, export, and clear plugin logs
-- Manual page sync
-- Bulk import all pages
 - Scheduled source management
 
 OAuth flow:
@@ -235,7 +232,7 @@ Behavior:
 - Download each Flickr image through WordPress sideloading.
 - Store `_wpfp_flickr_photo_id` on the attachment.
 - Reuse an existing attachment when the Flickr photo ID already exists.
-- Optionally refresh metadata on existing attachments during manual, bulk, or scheduled sync.
+- Optionally refresh metadata on existing attachments during scheduled sync.
 - Store imported attachment IDs for a normalized per-page source key.
 - Store scheduled-source records using a logical source key that excludes `page`.
 - Render synced galleries through the same plugin gallery structure used by remote mode.
@@ -352,7 +349,7 @@ This is the safer integration path for now because it avoids coupling to undocum
 
 The repository currently includes an installable ZIP:
 
-`wp-flickr-portfolio-0.10.0.zip`
+`wp-flickr-portfolio-0.11.0.zip`
 
 That ZIP contains the expected top-level plugin folder:
 

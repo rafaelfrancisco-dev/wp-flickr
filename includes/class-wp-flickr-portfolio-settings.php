@@ -289,7 +289,6 @@ class WP_Flickr_Portfolio_Settings {
 			'[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001"]',
 			'[flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18"]',
 			'[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]',
-			'[flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18" mode="lazy"]',
 		);
 		$scheduled_sources = $this->get_scheduled_sources();
 		$source_defaults   = array(
@@ -297,7 +296,6 @@ class WP_Flickr_Portfolio_Settings {
 			'user_id'        => (string) $options['user_nsid'],
 			'photoset_id'    => '',
 			'per_page'       => (int) $options['default_per_page'],
-			'page'           => 1,
 			'privacy_filter' => 1,
 		);
 		?>
@@ -387,54 +385,6 @@ class WP_Flickr_Portfolio_Settings {
 
 			<hr>
 
-			<h2><?php esc_html_e( 'Manual Media Sync', 'wp-flickr-portfolio' ); ?></h2>
-			<p><?php esc_html_e( 'Import one specific Flickr result page into the Media Library.', 'wp-flickr-portfolio' ); ?></p>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-				<input type="hidden" name="action" value="wpfp_sync_source">
-				<?php wp_nonce_field( 'wpfp_sync_source' ); ?>
-				<table class="form-table" role="presentation">
-					<tbody>
-						<?php $this->render_source_fields( $source_defaults, 'single', true ); ?>
-						<tr>
-							<th scope="row"><label for="wpfp_single_refresh_existing"><?php esc_html_e( 'Refresh existing imports', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<label for="wpfp_single_refresh_existing">
-									<input id="wpfp_single_refresh_existing" name="refresh_existing" type="checkbox" value="1">
-									<?php esc_html_e( 'Update metadata on attachments that were already imported from Flickr.', 'wp-flickr-portfolio' ); ?>
-								</label>
-							</td>
-						</tr>
-					</tbody>
-				</table>
-				<?php submit_button( __( 'Sync Source Into Media Library', 'wp-flickr-portfolio' ), 'secondary' ); ?>
-			</form>
-
-			<hr>
-
-			<h2><?php esc_html_e( 'Import All Pages', 'wp-flickr-portfolio' ); ?></h2>
-			<p><?php esc_html_e( 'Fetch every Flickr page for a source and store each page mapping for attachment-based galleries.', 'wp-flickr-portfolio' ); ?></p>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-				<input type="hidden" name="action" value="wpfp_sync_all_pages">
-				<?php wp_nonce_field( 'wpfp_sync_all_pages' ); ?>
-				<table class="form-table" role="presentation">
-					<tbody>
-						<?php $this->render_source_fields( $source_defaults, 'bulk', false ); ?>
-						<tr>
-							<th scope="row"><label for="wpfp_bulk_refresh_existing"><?php esc_html_e( 'Refresh existing imports', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<label for="wpfp_bulk_refresh_existing">
-									<input id="wpfp_bulk_refresh_existing" name="refresh_existing" type="checkbox" value="1">
-									<?php esc_html_e( 'Update metadata on attachments that already exist while importing all pages.', 'wp-flickr-portfolio' ); ?>
-								</label>
-							</td>
-						</tr>
-					</tbody>
-				</table>
-				<?php submit_button( __( 'Import All Pages For Source', 'wp-flickr-portfolio' ), 'secondary' ); ?>
-			</form>
-
-			<hr>
-
 			<h2><?php esc_html_e( 'Scheduled Sync', 'wp-flickr-portfolio' ); ?></h2>
 			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a daily WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached sync requests and runs Run Now in the background.', 'wp-flickr-portfolio' ); ?></p>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -442,7 +392,7 @@ class WP_Flickr_Portfolio_Settings {
 				<?php wp_nonce_field( 'wpfp_save_scheduled_source' ); ?>
 				<table class="form-table" role="presentation">
 					<tbody>
-						<?php $this->render_source_fields( $source_defaults, 'scheduled', false ); ?>
+						<?php $this->render_source_fields( $source_defaults, 'scheduled' ); ?>
 						<tr>
 							<th scope="row"><label for="wpfp_scheduled_refresh_existing"><?php esc_html_e( 'Refresh existing imports', 'wp-flickr-portfolio' ); ?></label></th>
 							<td>
@@ -787,10 +737,9 @@ class WP_Flickr_Portfolio_Settings {
 	 *
 	 * @param array<string,mixed> $values Form defaults.
 	 * @param string              $prefix DOM prefix.
-	 * @param bool                $include_page Whether to include the page field.
 	 * @return void
 	 */
-	private function render_source_fields( array $values, $prefix, $include_page ) {
+	private function render_source_fields( array $values, $prefix ) {
 		?>
 		<tr>
 			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_source"><?php esc_html_e( 'Source type', 'wp-flickr-portfolio' ); ?></label></th>
@@ -816,12 +765,6 @@ class WP_Flickr_Portfolio_Settings {
 			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_limit"><?php esc_html_e( 'Items per page', 'wp-flickr-portfolio' ); ?></label></th>
 			<td><input id="wpfp_<?php echo esc_attr( $prefix ); ?>_limit" name="per_page" type="number" min="1" max="500" value="<?php echo esc_attr( (string) absint( $values['per_page'] ) ); ?>"></td>
 		</tr>
-		<?php if ( $include_page ) : ?>
-			<tr>
-				<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_page"><?php esc_html_e( 'Page', 'wp-flickr-portfolio' ); ?></label></th>
-				<td><input id="wpfp_<?php echo esc_attr( $prefix ); ?>_page" name="page" type="number" min="1" value="<?php echo esc_attr( (string) absint( $values['page'] ) ); ?>"></td>
-			</tr>
-		<?php endif; ?>
 		<tr>
 			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_privacy"><?php esc_html_e( 'Privacy filter', 'wp-flickr-portfolio' ); ?></label></th>
 			<td>
@@ -951,12 +894,6 @@ class WP_Flickr_Portfolio_Settings {
 				break;
 			case 'cache_cleared':
 				$text = __( 'Cached Flickr responses cleared.', 'wp-flickr-portfolio' );
-				break;
-			case 'sync_complete':
-				$text = __( 'Flickr source synced into the Media Library.', 'wp-flickr-portfolio' );
-				break;
-			case 'bulk_sync_complete':
-				$text = __( 'All Flickr pages for the selected source were imported.', 'wp-flickr-portfolio' );
 				break;
 			case 'schedule_saved':
 				$text = __( 'Scheduled source saved.', 'wp-flickr-portfolio' );

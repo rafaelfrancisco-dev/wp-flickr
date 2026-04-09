@@ -20,11 +20,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	const CRON_HOOK = 'wpfp_run_scheduled_source_event';
 
 	/**
-	 * Lock lifetime for one source-page sync run.
-	 */
-	const SOURCE_SYNC_LOCK_TTL = 15 * MINUTE_IN_SECONDS;
-
-	/**
 	 * Lock lifetime for one scheduled sync run.
 	 */
 	const SCHEDULE_LOCK_TTL = 30 * MINUTE_IN_SECONDS;
@@ -62,86 +57,12 @@ class WP_Flickr_Portfolio_Media_Sync {
 		$this->api      = $api;
 		$this->logger   = $logger;
 
-		add_action( 'admin_post_wpfp_sync_source', array( $this, 'handle_sync_request' ) );
-		add_action( 'admin_post_wpfp_sync_all_pages', array( $this, 'handle_bulk_sync_request' ) );
 		add_action( 'admin_post_wpfp_save_scheduled_source', array( $this, 'handle_save_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_remove_scheduled_source', array( $this, 'handle_remove_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_toggle_scheduled_source', array( $this, 'handle_toggle_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_run_scheduled_source', array( $this, 'handle_run_scheduled_source' ) );
 		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
 		add_action( self::CRON_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
-	}
-
-	/**
-	 * Sync a single source page into the media library.
-	 *
-	 * @param array<string,mixed> $source Source arguments.
-	 * @param array<string,mixed> $options Sync options.
-	 * @return array<string,mixed>|\WP_Error
-	 */
-	public function sync_source( array $source, array $options = array() ) {
-		$this->logger->info(
-			'media_sync',
-			'Starting one-page Flickr sync.',
-			array_merge( $this->source_log_context( $source ), array( 'refresh_existing' => ! empty( $options['refresh_existing'] ) ) ),
-			'sync_source_start'
-		);
-
-		$gallery = $this->api->get_gallery_data( $source, true );
-		if ( is_wp_error( $gallery ) ) {
-			$this->logger->error(
-				'media_sync',
-				$gallery->get_error_message(),
-				array_merge( $this->source_log_context( $source ), array( 'code' => $gallery->get_error_code() ) ),
-				'sync_source_error'
-			);
-			return $gallery;
-		}
-
-		return $this->sync_gallery_payload( $gallery, $options );
-	}
-
-	/**
-	 * Ensure a single source page is synced and return the resolved attachment IDs.
-	 *
-	 * @param array<string,mixed> $source Source arguments.
-	 * @param array<string,mixed> $options Sync options.
-	 * @return array<int,int>|\WP_Error
-	 */
-	public function ensure_source_page_synced( array $source, array $options = array() ) {
-		$normalized = $this->api->normalize_source_args( $source );
-		if ( is_wp_error( $normalized ) ) {
-			return $normalized;
-		}
-
-		$existing = $this->get_synced_attachment_ids( $normalized );
-		if ( ! empty( $existing ) ) {
-			$this->logger->debug( 'media_sync', 'Requested page already has synced attachments.', array_merge( $this->source_log_context( $normalized ), array( 'attachments' => count( $existing ) ) ), 'ensure_already_synced' );
-			return $existing;
-		}
-
-		$source_key = $this->api->build_source_key( $normalized );
-		$lock_key   = $this->source_sync_lock_key( $source_key );
-		if ( get_transient( $lock_key ) ) {
-			$this->logger->warning( 'media_sync', 'Inline page sync skipped because a sync lock is already active.', $this->source_log_context( $normalized ), 'ensure_locked' );
-			return $this->get_synced_attachment_ids( $normalized );
-		}
-
-		set_transient( $lock_key, time(), self::SOURCE_SYNC_LOCK_TTL );
-
-		try {
-			$result = $this->sync_source( $normalized, $options );
-			if ( is_wp_error( $result ) ) {
-				$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $normalized ), array( 'code' => $result->get_error_code() ) ), 'ensure_sync_error' );
-				return $result;
-			}
-
-			$resolved = $this->get_synced_attachment_ids( $normalized );
-			$this->logger->info( 'media_sync', 'Inline page sync completed.', array_merge( $this->source_log_context( $normalized ), array( 'attachments' => count( $resolved ) ) ), 'ensure_sync_complete' );
-			return $resolved;
-		} finally {
-			delete_transient( $lock_key );
-		}
 	}
 
 	/**
@@ -338,62 +259,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	}
 
 	/**
-	 * Handle manual admin sync.
-	 *
-	 * @return void
-	 */
-	public function handle_sync_request() {
-		$this->assert_manage_options();
-		check_admin_referer( 'wpfp_sync_source' );
-
-		$request_source = $this->source_from_request( true );
-		$this->logger->info( 'media_sync', 'Manual one-page sync requested from admin.', $this->source_log_context( $request_source ), 'manual_sync_requested' );
-
-		$result = $this->sync_source(
-			$request_source,
-			array(
-				'refresh_existing' => ! empty( $_POST['refresh_existing'] ),
-			)
-		);
-
-		if ( is_wp_error( $result ) ) {
-			$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $request_source ), array( 'code' => $result->get_error_code() ) ), 'manual_sync_failed' );
-			$this->redirect_with_notice( 'sync_error' );
-		}
-
-		$this->logger->info( 'media_sync', 'Manual one-page sync completed.', array_merge( $this->source_log_context( $request_source ), array( 'attachments' => absint( $result['attachments'] ?? 0 ) ) ), 'manual_sync_complete' );
-		$this->redirect_with_notice( 'sync_complete' );
-	}
-
-	/**
-	 * Handle bulk sync of all pages.
-	 *
-	 * @return void
-	 */
-	public function handle_bulk_sync_request() {
-		$this->assert_manage_options();
-		check_admin_referer( 'wpfp_sync_all_pages' );
-
-		$request_source = $this->source_from_request( false );
-		$this->logger->info( 'media_sync', 'Bulk all-pages sync requested from admin.', $this->source_log_context( $request_source ), 'bulk_sync_requested' );
-
-		$result = $this->sync_all_pages(
-			$request_source,
-			array(
-				'refresh_existing' => ! empty( $_POST['refresh_existing'] ),
-			)
-		);
-
-		if ( is_wp_error( $result ) ) {
-			$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $request_source ), array( 'code' => $result->get_error_code() ) ), 'bulk_sync_failed' );
-			$this->redirect_with_notice( 'sync_error' );
-		}
-
-		$this->logger->info( 'media_sync', 'Bulk all-pages sync completed.', array_merge( $this->source_log_context( $request_source ), array( 'pages_synced' => absint( $result['pages_synced'] ?? 0 ), 'total_pages' => absint( $result['total_pages'] ?? 0 ) ) ), 'bulk_sync_complete' );
-		$this->redirect_with_notice( 'bulk_sync_complete' );
-	}
-
-	/**
 	 * Handle saving a scheduled source.
 	 *
 	 * @return void
@@ -402,7 +267,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		$this->assert_manage_options();
 		check_admin_referer( 'wpfp_save_scheduled_source' );
 
-		$source = $this->api->normalize_source_args( $this->source_from_request( false ) );
+		$source = $this->api->normalize_source_args( $this->source_from_request() );
 		if ( is_wp_error( $source ) ) {
 			$this->redirect_with_notice( 'schedule_error' );
 		}
@@ -1079,16 +944,15 @@ class WP_Flickr_Portfolio_Media_Sync {
 	/**
 	 * Parse a source record from a request.
 	 *
-	 * @param bool $include_page Whether to include the posted page value.
 	 * @return array<string,mixed>
 	 */
-	private function source_from_request( $include_page ) {
+	private function source_from_request() {
 		return array(
 			'source'         => isset( $_POST['source'] ) ? sanitize_key( wp_unslash( $_POST['source'] ) ) : 'photoset',
 			'user_id'        => isset( $_POST['user_id'] ) ? sanitize_text_field( wp_unslash( $_POST['user_id'] ) ) : '',
 			'photoset_id'    => isset( $_POST['photoset_id'] ) ? sanitize_text_field( wp_unslash( $_POST['photoset_id'] ) ) : '',
 			'per_page'       => isset( $_POST['per_page'] ) ? absint( wp_unslash( $_POST['per_page'] ) ) : 24,
-			'page'           => $include_page && isset( $_POST['page'] ) ? absint( wp_unslash( $_POST['page'] ) ) : 1,
+			'page'           => 1,
 			'privacy_filter' => isset( $_POST['privacy_filter'] ) ? absint( wp_unslash( $_POST['privacy_filter'] ) ) : 1,
 		);
 	}
@@ -1210,16 +1074,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 */
 	private function scheduled_source_lock_key( $base_key ) {
 		return 'wpfp_schedule_lock_' . md5( (string) $base_key );
-	}
-
-	/**
-	 * Build a transient key used to lock a source-page sync while it runs.
-	 *
-	 * @param string $source_key Source key.
-	 * @return string
-	 */
-	private function source_sync_lock_key( $source_key ) {
-		return 'wpfp_source_sync_lock_' . md5( (string) $source_key );
 	}
 
 	/**

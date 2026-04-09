@@ -4,11 +4,11 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.10.0
+Stable tag: 0.11.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Fetch Flickr albums and photostream images into WordPress, with remote rendering for Meow Lightbox and optional manual or scheduled media sync for Meow Gallery.
+Fetch Flickr albums and photostream images into WordPress, with remote rendering for Meow Lightbox and optional scheduled media sync for Meow Gallery.
 
 == Description ==
 
@@ -19,7 +19,7 @@ Features:
 - OAuth 1.0a connection flow for Flickr private read access.
 - Shortcode-driven remote Flickr galleries.
 - Native Gutenberg block for inserting Flickr galleries visually.
-- Manual per-page sync and bulk all-pages import into the WordPress Media Library.
+- Scheduled sync for selected Flickr sources with background run-now support, replacing manual per-page and bulk import.
 - Optional metadata refresh for already imported Flickr attachments.
 - Optional daily scheduled sync for selected Flickr sources with background run-now support.
 - Dedicated admin log viewer for recent plugin activity.
@@ -63,17 +63,13 @@ Imported-attachment example:
 
 [flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]
 
-Lazy-sync example:
-
-[flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18" mode="lazy"]
-
 Captionless example:
 
 [flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" captions="false"]
 
 = How does media sync work? =
 
-You can sync one Flickr result page, import all pages for a source, or configure a daily scheduled sync for selected sources. Existing imports are matched by Flickr photo ID to avoid duplicates, refresh mode updates metadata on those existing attachments, and local gallery modes are matched against the exact source configuration including `per_page` and `page`.
+Add a scheduled source for a Flickr photoset or photostream, then use Run Now to import all pages on demand. Existing imports are matched by Flickr photo ID to avoid duplicates, refresh mode updates metadata on those existing attachments, and local gallery modes are matched against the exact source configuration including `per_page` and `page`.
 
 = Is there a Gutenberg block? =
 
@@ -84,6 +80,12 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.11.0 =
+
+- Removed the Manual Media Sync and Import All Pages admin sections. Use the Scheduled Sync section to add a source, then click Run Now to import on demand.
+- Removed the per-page sync and bulk all-pages admin-post handlers and their associated dead code.
+- Cleaned up stale `mode="lazy"` references from documentation.
 
 = 0.10.0 =
 
