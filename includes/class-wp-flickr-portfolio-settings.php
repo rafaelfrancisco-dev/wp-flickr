@@ -398,7 +398,7 @@ class WP_Flickr_Portfolio_Settings {
 			<hr>
 
 			<h2><?php esc_html_e( 'Scheduled Sync', 'wp-flickr-portfolio' ); ?></h2>
-			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a scheduled WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached sync requests and runs Run Now in the background.', 'wp-flickr-portfolio' ); ?></p>
+			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a scheduled WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached sync requests and executes Run Now immediately in the current admin request.', 'wp-flickr-portfolio' ); ?></p>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<input type="hidden" name="action" value="wpfp_save_scheduled_source">
 				<?php wp_nonce_field( 'wpfp_save_scheduled_source' ); ?>

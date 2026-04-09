@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.12.2
+Stable tag: 0.12.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -19,9 +19,9 @@ Features:
 - OAuth 1.0a connection flow for Flickr private read access.
 - Shortcode-driven remote Flickr galleries.
 - Native Gutenberg block for inserting Flickr galleries visually.
-- Scheduled sync for selected Flickr sources with background run-now support, replacing manual per-page and bulk import.
+- Scheduled sync for selected Flickr sources with immediate admin-side Run Now support, replacing manual per-page and bulk import.
 - Optional metadata refresh for already imported Flickr attachments.
-- Optional daily scheduled sync for selected Flickr sources with background run-now support.
+- Optional recurring scheduled sync for selected Flickr sources with immediate admin-side Run Now support.
 - Dedicated admin log viewer for recent plugin activity.
 - Paginated log browsing with level and component filters.
 - Export filtered log entries as a downloadable text file.
@@ -80,6 +80,12 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.12.3 =
+
+- Changed the admin `Run Now` action to execute immediately in the current admin request instead of queueing a background WP-Cron loopback.
+- Scheduled recurring syncs now start on their real interval instead of auto-firing one minute after saving a source.
+- Updated sync notices and docs to reflect the foreground `Run Now` behavior.
 
 = 0.12.2 =
 

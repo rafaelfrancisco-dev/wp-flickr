@@ -15,7 +15,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 	const IMPORT_DOWNLOAD_TIMEOUT = 300;
 
 	/**
-	 * Manual run-now cron hook.
+	 * Legacy manual run-now cron hook kept for already queued events.
 	 */
 	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
 
@@ -454,17 +454,21 @@ class WP_Flickr_Portfolio_Media_Sync {
 		$base_key = isset( $_GET['base_key'] ) ? sanitize_text_field( wp_unslash( $_GET['base_key'] ) ) : '';
 		check_admin_referer( 'wpfp_run_scheduled_source_' . $base_key );
 
-		$result = $this->queue_scheduled_source_run( $base_key );
+		$result = $this->run_scheduled_source( $base_key );
 		if ( is_wp_error( $result ) ) {
-			$this->logger->warning( 'media_sync', $result->get_error_message(), array( 'base_key' => $base_key, 'code' => $result->get_error_code() ), 'schedule_run_queue_error' );
-			if ( in_array( $result->get_error_code(), array( 'wpfp_schedule_running', 'wpfp_schedule_queued' ), true ) ) {
-				$this->redirect_with_notice( 'schedule_run_queued' );
-			}
-
-			$this->redirect_with_notice( 'schedule_error' );
+			$this->logger->warning( 'media_sync', $result->get_error_message(), array( 'base_key' => $base_key, 'code' => $result->get_error_code() ), 'schedule_run_error' );
+			$this->redirect_with_notice( 'schedule_error', $result->get_error_message() );
 		}
 
-		$this->redirect_with_notice( 'schedule_run_queued' );
+		$this->redirect_with_notice(
+			'schedule_run_complete',
+			sprintf(
+				/* translators: 1: synced pages, 2: total pages. */
+				__( 'Synced %1$d of %2$d pages.', 'wp-flickr-portfolio' ),
+				absint( $result['pages_synced'] ?? 0 ),
+				absint( $result['total_pages'] ?? 0 )
+			)
+		);
 	}
 
 	/**
@@ -1133,9 +1137,9 @@ class WP_Flickr_Portfolio_Media_Sync {
 			}
 
 			$records[ $base_key ]['last_status']  = 'running';
-			$records[ $base_key ]['last_message'] = __( 'Running background sync.', 'wp-flickr-portfolio' );
+			$records[ $base_key ]['last_message'] = __( 'Running sync.', 'wp-flickr-portfolio' );
 			$this->save_scheduled_sources( $records );
-			$this->logger->info( 'media_sync', 'Scheduled source background sync started.', array( 'base_key' => $base_key ), 'schedule_running' );
+			$this->logger->info( 'media_sync', 'Scheduled source sync started.', array( 'base_key' => $base_key ), 'schedule_running' );
 
 			$record = $records[ $base_key ];
 			$source = array(
@@ -1174,47 +1178,12 @@ class WP_Flickr_Portfolio_Media_Sync {
 				absint( $result['total_pages'] ?? 0 )
 			);
 			$this->save_scheduled_sources( $records );
-			$this->logger->info( 'media_sync', 'Scheduled source background sync completed.', array( 'base_key' => $base_key, 'pages_synced' => absint( $result['pages_synced'] ?? 0 ), 'total_pages' => absint( $result['total_pages'] ?? 0 ) ), 'schedule_complete' );
+			$this->logger->info( 'media_sync', 'Scheduled source sync completed.', array( 'base_key' => $base_key, 'pages_synced' => absint( $result['pages_synced'] ?? 0 ), 'total_pages' => absint( $result['total_pages'] ?? 0 ) ), 'schedule_complete' );
 
 			return $result;
 		} finally {
 			delete_transient( $lock_key );
 		}
-	}
-
-	/**
-	 * Queue a background run-now execution for one scheduled source.
-	 *
-	 * @param string $base_key Source key.
-	 * @return bool|\WP_Error
-	 */
-	private function queue_scheduled_source_run( $base_key ) {
-		if ( ! $base_key ) {
-			return new WP_Error( 'wpfp_missing_schedule_key', __( 'Missing scheduled source key.', 'wp-flickr-portfolio' ) );
-		}
-
-		$records = $this->get_scheduled_sources();
-		if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
-			return new WP_Error( 'wpfp_missing_schedule_source', __( 'Scheduled source not found.', 'wp-flickr-portfolio' ) );
-		}
-
-		if ( get_transient( $this->scheduled_source_lock_key( $base_key ) ) ) {
-			return new WP_Error( 'wpfp_schedule_running', __( 'This scheduled source is already running.', 'wp-flickr-portfolio' ) );
-		}
-
-		if ( wp_next_scheduled( self::MANUAL_SCHEDULE_HOOK, array( $base_key ) ) ) {
-			return new WP_Error( 'wpfp_schedule_queued', __( 'This scheduled source is already queued to run.', 'wp-flickr-portfolio' ) );
-		}
-
-		$records[ $base_key ]['last_status']  = 'queued';
-		$records[ $base_key ]['last_message'] = __( 'Queued to run in the background.', 'wp-flickr-portfolio' );
-		$this->save_scheduled_sources( $records );
-
-		wp_schedule_single_event( time(), self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
-		$this->maybe_spawn_cron();
-		$this->logger->info( 'media_sync', 'Queued scheduled source to run in the background.', array( 'base_key' => $base_key ), 'schedule_queued' );
-
-		return true;
 	}
 
 	/**
@@ -1225,17 +1194,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 */
 	private function scheduled_source_lock_key( $base_key ) {
 		return 'wpfp_schedule_lock_' . md5( (string) $base_key );
-	}
-
-	/**
-	 * Trigger WP-Cron as soon as possible for queued background jobs.
-	 *
-	 * @return void
-	 */
-	private function maybe_spawn_cron() {
-		if ( function_exists( 'spawn_cron' ) ) {
-			spawn_cron( time() );
-		}
 	}
 
 	/**
@@ -1297,7 +1255,22 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 */
 	private function schedule_source( $base_key, $schedule ) {
 		$this->unschedule_source( $base_key );
-		wp_schedule_event( time() + MINUTE_IN_SECONDS, $schedule ? $schedule : 'daily', self::CRON_HOOK, array( $base_key ) );
+		$schedule = $schedule ? $schedule : 'daily';
+		$next_run = time() + $this->get_schedule_interval( $schedule );
+		wp_schedule_event( $next_run, $schedule, self::CRON_HOOK, array( $base_key ) );
+	}
+
+	/**
+	 * Resolve a cron schedule key to its interval in seconds.
+	 *
+	 * @param string $schedule Schedule key.
+	 * @return int
+	 */
+	private function get_schedule_interval( $schedule ) {
+		$schedules = wp_get_schedules();
+		$interval  = isset( $schedules[ $schedule ]['interval'] ) ? absint( $schedules[ $schedule ]['interval'] ) : DAY_IN_SECONDS;
+
+		return max( MINUTE_IN_SECONDS, $interval );
 	}
 
 	/**

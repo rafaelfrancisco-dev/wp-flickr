@@ -11,7 +11,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Insert galleries from a native Gutenberg block.
 - Import Flickr images into the Media Library via scheduled sync with on-demand Run Now.
 - Refresh metadata for already imported Flickr attachments when syncing.
-- Keep selected Flickr sources in sync with optional daily scheduled sync and background `Run Now`.
+- Keep selected Flickr sources in sync with optional recurring scheduled sync and an immediate admin-side `Run Now`.
 - Inspect recent plugin activity from a dedicated admin Logs screen with pagination, filtering, and text-file export.
 - Use remote galleries with Meow Lightbox via standard `.gallery` markup.
 - Use imported attachments with Meow Gallery through the normal WordPress gallery flow.
@@ -66,7 +66,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Meow Lightbox should detect the remote galleries out of the box because this plugin renders the `.gallery` class that Meow watches by default.
 - Meow Gallery works best with the synced attachment mode, because imported Flickr images become regular WordPress media items.
 - If you only need public content, you can skip OAuth and just use a valid Flickr API key and secret.
-- Scheduled sync uses WordPress cron and runs daily for each selected source. `Run Now` queues the job into WP-Cron instead of executing the whole import in the admin request.
+- Scheduled sync uses WordPress cron for recurring runs. `Run Now` executes immediately in the admin request instead of relying on a background WP-Cron loopback.
 - Flickr documents a shared API-key limit of `3600 queries per hour`, so uncached sync requests are paced conservatively.
 - Scheduled sync prefers Flickr's full/original file when available, so the local full-size attachment keeps the original image bytes and any embedded EXIF that Flickr preserved in that file.
 - Media imports now require the Flickr original by default. A new admin setting can re-enable fallback to smaller Flickr display sizes if you explicitly want that behavior.
