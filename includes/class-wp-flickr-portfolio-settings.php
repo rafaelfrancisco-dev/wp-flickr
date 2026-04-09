@@ -937,8 +937,10 @@ class WP_Flickr_Portfolio_Settings {
 		if ( ! $text ) {
 			return;
 		}
+
+		$detail = isset( $_GET['wpfp_notice_detail'] ) ? sanitize_text_field( wp_unslash( $_GET['wpfp_notice_detail'] ) ) : '';
 		?>
-		<div class="notice notice-<?php echo esc_attr( $type ); ?> is-dismissible"><p><?php echo esc_html( $text ); ?></p></div>
+		<div class="notice notice-<?php echo esc_attr( $type ); ?> is-dismissible"><p><?php echo esc_html( $text ); ?><?php if ( $detail ) : ?> <strong><?php echo esc_html( $detail ); ?></strong><?php endif; ?></p></div>
 		<?php
 	}
 

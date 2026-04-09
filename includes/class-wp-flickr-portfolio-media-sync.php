@@ -269,7 +269,8 @@ class WP_Flickr_Portfolio_Media_Sync {
 
 		$source = $this->api->normalize_source_args( $this->source_from_request() );
 		if ( is_wp_error( $source ) ) {
-			$this->redirect_with_notice( 'schedule_error' );
+			$this->logger->error( 'media_sync', $source->get_error_message(), array( 'code' => $source->get_error_code() ), 'schedule_save_failed' );
+			$this->redirect_with_notice( 'schedule_error', $source->get_error_message() );
 		}
 
 		$base_key = $this->api->build_collection_key( $source );
@@ -315,6 +316,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		check_admin_referer( 'wpfp_remove_scheduled_source_' . $base_key );
 
 		if ( ! $base_key ) {
+			$this->logger->error( 'media_sync', 'Missing scheduled source key for removal.', array(), 'schedule_remove_failed' );
 			$this->redirect_with_notice( 'schedule_error' );
 		}
 
@@ -340,11 +342,13 @@ class WP_Flickr_Portfolio_Media_Sync {
 		check_admin_referer( 'wpfp_toggle_scheduled_source_' . $base_key );
 
 		if ( ! $base_key ) {
+			$this->logger->error( 'media_sync', 'Missing scheduled source key for toggle.', array(), 'schedule_toggle_failed' );
 			$this->redirect_with_notice( 'schedule_error' );
 		}
 
 		$records = $this->get_scheduled_sources();
 		if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
+			$this->logger->error( 'media_sync', 'Scheduled source not found for toggle.', array( 'base_key' => $base_key ), 'schedule_toggle_failed' );
 			$this->redirect_with_notice( 'schedule_error' );
 		}
 
@@ -1183,14 +1187,14 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 * @param string $notice Notice key.
 	 * @return void
 	 */
-	private function redirect_with_notice( $notice ) {
-		wp_safe_redirect(
-			$this->settings->admin_page_url(
-				array(
-					'wpfp_notice' => $notice,
-				)
-			)
+	private function redirect_with_notice( $notice, $detail = '' ) {
+		$args = array(
+			'wpfp_notice' => $notice,
 		);
+		if ( $detail ) {
+			$args['wpfp_notice_detail'] = $detail;
+		}
+		wp_safe_redirect( $this->settings->admin_page_url( $args ) );
 		exit;
 	}
 }

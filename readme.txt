@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.11.0
+Stable tag: 0.12.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -80,6 +80,11 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.12.0 =
+
+- Fixed scheduled sync error handlers to write log entries before redirecting, so the Logs page always shows the reason for a failed save, remove, or toggle.
+- Added the specific error detail (e.g. missing photoset ID, missing user ID) to the admin notice when saving a scheduled source fails.
 
 = 0.11.0 =
 
