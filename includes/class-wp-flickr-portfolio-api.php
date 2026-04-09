@@ -62,6 +62,8 @@ class WP_Flickr_Portfolio_API {
 		add_action( 'admin_post_wpfp_disconnect_oauth', array( $this, 'handle_disconnect_oauth' ) );
 		add_action( 'admin_post_wpfp_clear_cache', array( $this, 'handle_clear_cache' ) );
 		add_action( 'admin_init', array( $this, 'maybe_handle_oauth_callback' ) );
+		add_action( 'wp_ajax_wpfp_get_exif', array( $this, 'handle_get_exif' ) );
+		add_action( 'wp_ajax_nopriv_wpfp_get_exif', array( $this, 'handle_get_exif' ) );
 	}
 
 	/**
@@ -414,6 +416,133 @@ class WP_Flickr_Portfolio_API {
 
 		wp_safe_redirect( $this->settings->admin_page_url( array( 'wpfp_notice' => 'cache_cleared' ) ) );
 		exit;
+	}
+
+	/**
+	 * AJAX handler for fetching EXIF data for a single Flickr photo.
+	 *
+	 * @return void
+	 */
+	public function handle_get_exif() {
+		check_ajax_referer( 'wpfp_get_exif', 'nonce' );
+
+		$photo_id = isset( $_POST['photo_id'] ) ? sanitize_text_field( wp_unslash( $_POST['photo_id'] ) ) : '';
+		if ( empty( $photo_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'Missing photo ID.', 'wp-flickr-portfolio' ) ), 400 );
+		}
+
+		$cache_key = 'wpfp_exif_' . md5( $photo_id );
+		$cached    = get_transient( $cache_key );
+		if ( false !== $cached && is_array( $cached ) ) {
+			wp_send_json_success( $cached );
+		}
+
+		$exif = $this->fetch_photo_exif( $photo_id );
+		if ( is_wp_error( $exif ) ) {
+			wp_send_json_error( array( 'message' => $exif->get_error_message() ), 500 );
+		}
+
+		set_transient( $cache_key, $exif, max( 60, (int) $this->settings->get( 'cache_ttl', 900 ) ) );
+
+		$known_keys   = get_option( 'wpfp_cache_keys', array() );
+		$known_keys[] = $cache_key;
+		update_option( 'wpfp_cache_keys', array_values( array_unique( $known_keys ) ), false );
+
+		wp_send_json_success( $exif );
+	}
+
+	/**
+	 * Fetch EXIF data from Flickr for a single photo.
+	 *
+	 * @param string $photo_id Flickr photo ID.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function fetch_photo_exif( $photo_id ) {
+		$params = array(
+			'method'         => 'flickr.photos.getExif',
+			'format'         => 'json',
+			'nojsoncallback' => '1',
+			'photo_id'       => (string) $photo_id,
+		);
+
+		$response = $this->request( $params, $this->settings->is_connected() );
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$exif_tags  = isset( $response['photo']['exif'] ) && is_array( $response['photo']['exif'] ) ? $response['photo']['exif'] : array();
+		$owner      = isset( $response['photo']['owner'] ) ? (string) $response['photo']['owner'] : '';
+		$location   = $this->fetch_photo_location( $photo_id );
+
+		$result = array(
+			'camera'    => $this->find_exif_tag( $exif_tags, 'Camera' ),
+			'lens'      => $this->find_exif_tag( $exif_tags, 'LensModel' ),
+			'aperture'  => $this->find_exif_tag( $exif_tags, 'FNumber' ) ?: $this->find_exif_tag( $exif_tags, 'Aperture' ),
+			'shutter'   => $this->find_exif_tag( $exif_tags, 'ExposureTime' ),
+			'iso'       => $this->find_exif_tag( $exif_tags, 'ISO' ),
+			'focal'     => $this->find_exif_tag( $exif_tags, 'FocalLength' ),
+			'latitude'  => '',
+			'longitude' => '',
+			'flickrUrl' => $owner ? 'https://www.flickr.com/photos/' . $owner . '/' . $photo_id . '/' : '',
+		);
+
+		if ( ! is_wp_error( $location ) && is_array( $location ) ) {
+			$result['latitude']  = (string) ( $location['latitude'] ?? '' );
+			$result['longitude'] = (string) ( $location['longitude'] ?? '' );
+		}
+
+		return array_filter( $result, static function( $value ) {
+			return '' !== $value;
+		});
+	}
+
+	/**
+	 * Fetch geo location for a photo.
+	 *
+	 * @param string $photo_id Flickr photo ID.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function fetch_photo_location( $photo_id ) {
+		$params = array(
+			'method'         => 'flickr.photos.geo.getLocation',
+			'format'         => 'json',
+			'nojsoncallback' => '1',
+			'photo_id'       => (string) $photo_id,
+		);
+
+		$response = $this->request( $params, $this->settings->is_connected() );
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$location = isset( $response['photo']['location'] ) && is_array( $response['photo']['location'] ) ? $response['photo']['location'] : array();
+
+		return array(
+			'latitude'  => isset( $location['latitude'] ) ? (string) $location['latitude'] : '',
+			'longitude' => isset( $location['longitude'] ) ? (string) $location['longitude'] : '',
+		);
+	}
+
+	/**
+	 * Find a tag value from Flickr EXIF response.
+	 *
+	 * @param array<int,array<string,mixed>> $tags EXIF tags array.
+	 * @param string                         $tag_name Tag name to find.
+	 * @return string
+	 */
+	private function find_exif_tag( array $tags, $tag_name ) {
+		foreach ( $tags as $tag ) {
+			if ( ! is_array( $tag ) ) {
+				continue;
+			}
+
+			$raw_tag = isset( $tag['tag'] ) ? (string) $tag['tag'] : '';
+			if ( strtolower( $raw_tag ) === strtolower( $tag_name ) ) {
+				return isset( $tag['raw']['_content'] ) ? (string) $tag['raw']['_content'] : '';
+			}
+		}
+
+		return '';
 	}
 
 	/**

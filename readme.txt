@@ -1,14 +1,14 @@
 === WP Flickr Portfolio ===
 Contributors: rafaelfrancisco
-Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
+Tags: flickr, gallery, portfolio, lightbox, exif
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.15.0
+Stable tag: 0.16.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Fetch Flickr albums and photostream images into WordPress, with remote rendering for Meow Lightbox and optional scheduled media sync for Meow Gallery.
+Fetch Flickr albums and photostream images into WordPress with a built-in EXIF lightbox showing camera, lens, aperture, shutter speed, ISO and location.
 
 == Description ==
 
@@ -19,14 +19,12 @@ Features:
 - OAuth 1.0a connection flow for Flickr private read access.
 - Shortcode-driven remote Flickr galleries.
 - Native Gutenberg block for inserting Flickr galleries visually.
-- Scheduled sync for selected Flickr sources with immediate admin-side Run Now support, replacing manual per-page and bulk import.
-- Optional metadata refresh for already imported Flickr attachments.
-- Optional recurring scheduled sync for selected Flickr sources with immediate admin-side Run Now support.
+- Built-in lightbox with full-size image display and EXIF information (camera, lens, aperture, shutter speed, ISO, focal length, and location when available).
+- Direct link to the original photo on Flickr from the lightbox.
+- Keyboard navigation (arrow keys for prev/next, Escape to close) in the lightbox.
 - Dedicated admin log viewer for recent plugin activity.
 - Paginated log browsing with level and component filters.
 - Export filtered log entries as a downloadable text file.
-- Gallery markup that fits Meow Lightbox's default selectors.
-- Attachment-based galleries that work naturally with Meow Gallery after sync.
 - Frontend pagination links that work without JavaScript.
 
 == Installation ==
@@ -37,7 +35,7 @@ Features:
 4. Add your Flickr API key and secret.
 5. Configure your Flickr app's OAuth callback URL to the value shown on the settings page.
 6. Connect Flickr if you need private content access.
-7. Use the `Logs` subpage to inspect recent plugin activity when debugging sync behavior.
+7. Use the `Logs` subpage to inspect recent plugin activity.
 
 == Frequently Asked Questions ==
 
@@ -45,9 +43,9 @@ Features:
 
 Yes. Public sources work with a valid API key and secret even if you do not connect a Flickr account.
 
-= How do Meow Gallery and Meow Lightbox fit in? =
+= What does the lightbox show? =
 
-Remote galleries render `.gallery` markup so Meow Lightbox can attach on the frontend. If you sync Flickr photos into the Media Library, the imported attachments can be used by Meow Gallery like normal WordPress media.
+Clicking a gallery image opens a full-screen lightbox with the largest available image. The bottom bar shows EXIF metadata (camera, lens, aperture, shutter speed, ISO, focal length, and location) fetched from Flickr. A "View on Flickr" link opens the original photo page.
 
 = What shortcode should I use? =
 
@@ -59,17 +57,9 @@ Photostream example:
 
 [flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18"]
 
-Imported-attachment example:
-
-[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]
-
 Captionless example:
 
 [flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" captions="false"]
-
-= How does media sync work? =
-
-Add a scheduled source for a Flickr photoset or photostream, then use Run Now to import all pages on demand. Existing imports are matched by Flickr photo ID to avoid duplicates, refresh mode updates metadata on those existing attachments, and local gallery modes are matched against the exact source configuration including `per_page` and `page`.
 
 = Is there a Gutenberg block? =
 
@@ -77,9 +67,16 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 
 = Is there a debug log viewer? =
 
-Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
+Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, gallery rendering, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.16.0 =
+
+- Added a built-in lightbox that shows the full-size Flickr image with EXIF information (camera, lens, aperture, shutter speed, ISO, focal length, and location) and a direct link to the original on Flickr.
+- Added keyboard navigation (arrow keys for prev/next, Escape to close) and click-outside-to-close for the lightbox.
+- Removed Meow Lightbox support and the lightbox selector setting.
+- Removed media library import, scheduled sync, and all associated settings and UI.
 
 = 0.15.0 =
 

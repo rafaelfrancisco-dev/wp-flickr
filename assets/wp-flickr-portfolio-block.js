@@ -25,7 +25,6 @@
 			per_page: { type: 'number', default: 24 },
 			page: { type: 'number', default: 1 },
 			privacy_filter: { type: 'number', default: 1 },
-			mode: { type: 'string', default: 'remote' },
 			layout: { type: 'string', default: 'grid' },
 			columns: { type: 'number', default: 3 },
 			captions: { type: 'boolean', default: true },
@@ -82,18 +81,6 @@
 								}
 							} )
 							: null,
-						createElement( SelectControl, {
-							label: __( 'Mode', 'wp-flickr-portfolio' ),
-							value: attributes.mode,
-							options: [
-								{ label: __( 'Remote Flickr URLs', 'wp-flickr-portfolio' ), value: 'remote' },
-								{ label: __( 'Imported media only', 'wp-flickr-portfolio' ), value: 'media' },
-								{ label: __( 'Imported media fallback to remote', 'wp-flickr-portfolio' ), value: 'auto' }
-							],
-							onChange: function( value ) {
-								setAttributes( { mode: value } );
-							}
-						} ),
 						createElement( SelectControl, {
 							label: __( 'Privacy Filter', 'wp-flickr-portfolio' ),
 							value: String( attributes.privacy_filter ),

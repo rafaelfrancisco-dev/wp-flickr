@@ -31,13 +31,6 @@ class WP_Flickr_Portfolio_Shortcode {
 	private $api;
 
 	/**
-	 * Media sync service.
-	 *
-	 * @var WP_Flickr_Portfolio_Media_Sync
-	 */
-	private $media_sync;
-
-	/**
 	 * Shared logger.
 	 *
 	 * @var WP_Flickr_Portfolio_Logger
@@ -47,16 +40,14 @@ class WP_Flickr_Portfolio_Shortcode {
 	/**
 	 * Constructor.
 	 *
-	 * @param WP_Flickr_Portfolio_Settings   $settings Settings manager.
-	 * @param WP_Flickr_Portfolio_API        $api API client.
-	 * @param WP_Flickr_Portfolio_Media_Sync $media_sync Media sync service.
-	 * @param WP_Flickr_Portfolio_Logger     $logger Logger service.
+	 * @param WP_Flickr_Portfolio_Settings $settings Settings manager.
+	 * @param WP_Flickr_Portfolio_API      $api API client.
+	 * @param WP_Flickr_Portfolio_Logger   $logger Logger service.
 	 */
-	public function __construct( WP_Flickr_Portfolio_Settings $settings, WP_Flickr_Portfolio_API $api, WP_Flickr_Portfolio_Media_Sync $media_sync, WP_Flickr_Portfolio_Logger $logger ) {
-		$this->settings   = $settings;
-		$this->api        = $api;
-		$this->media_sync = $media_sync;
-		$this->logger     = $logger;
+	public function __construct( WP_Flickr_Portfolio_Settings $settings, WP_Flickr_Portfolio_API $api, WP_Flickr_Portfolio_Logger $logger ) {
+		$this->settings = $settings;
+		$this->api      = $api;
+		$this->logger   = $logger;
 
 		add_shortcode( 'flickr_portfolio', array( $this, 'render_shortcode' ) );
 		add_action( 'init', array( $this, 'register_block' ), 20 );
@@ -75,7 +66,6 @@ class WP_Flickr_Portfolio_Shortcode {
 			'per_page'       => (string) $this->settings->get( 'default_per_page', 24 ),
 			'page'           => '1',
 			'privacy_filter' => '1',
-			'mode'           => (string) $this->settings->get( 'default_mode', 'remote' ),
 			'layout'         => (string) $this->settings->get( 'default_layout', 'grid' ),
 			'columns'        => '3',
 			'captions'       => 'true',
@@ -125,10 +115,6 @@ class WP_Flickr_Portfolio_Shortcode {
 					'privacy_filter' => array(
 						'type'    => 'number',
 						'default' => 1,
-					),
-					'mode'           => array(
-						'type'    => 'string',
-						'default' => (string) $this->settings->get( 'default_mode', 'remote' ),
 					),
 					'layout'         => array(
 						'type'    => 'string',
@@ -203,21 +189,15 @@ class WP_Flickr_Portfolio_Shortcode {
 			return $this->render_error( $source->get_error_message() );
 		}
 
-		$mode       = in_array( $atts['mode'], array( 'remote', 'media', 'auto' ), true ) ? $atts['mode'] : 'remote';
 		$layout     = $this->settings->normalize_layout( $atts['layout'] );
 		$captions   = filter_var( $atts['captions'], FILTER_VALIDATE_BOOLEAN );
 		$captions   = 'masonry' === $layout ? false : $captions;
-		$synced_ids = $this->media_sync->get_synced_attachment_ids( $source );
-		$gallery    = null;
-		$expected_photo_count = 0;
-		$has_synced = ! empty( $synced_ids );
+
 		$this->logger->debug(
 			'shortcode',
 			'Rendering Flickr gallery shortcode.',
 			array(
-				'mode'       => $mode,
 				'layout'     => $layout,
-				'has_synced' => $has_synced,
 				'source'     => isset( $source['source'] ) ? (string) $source['source'] : '',
 				'page'       => isset( $source['page'] ) ? absint( $source['page'] ) : 1,
 				'per_page'   => isset( $source['per_page'] ) ? absint( $source['per_page'] ) : 0,
@@ -226,50 +206,25 @@ class WP_Flickr_Portfolio_Shortcode {
 			'render_start'
 		);
 
-		if ( in_array( $mode, array( 'media', 'auto' ), true ) ) {
-			$gallery = $this->api->get_gallery_data( $source );
-			if ( ! is_wp_error( $gallery ) && ! empty( $gallery['photos'] ) && is_array( $gallery['photos'] ) ) {
-				$expected_photo_count = count( $gallery['photos'] );
-				$has_synced          = $has_synced && count( $synced_ids ) >= $expected_photo_count;
-			}
-		}
-
-		$should_show = in_array( $mode, array( 'media', 'auto' ), true ) && $has_synced;
-
-		if ( 'media' === $mode && ! $has_synced ) {
-			$this->logger->warning( 'shortcode', 'Media mode blocked because the requested page is not synced.', array( 'source_key' => $this->api->build_source_key( $source ) ), 'media_unsynced' );
-			return $this->render_error( __( 'This gallery page has not been synced to the Media Library yet.', 'wp-flickr-portfolio' ) );
-		}
-
-		if ( $should_show ) {
-			if ( is_array( $gallery ) && empty( $atts['title'] ) && ! empty( $gallery['title'] ) ) {
-				$atts['title'] = (string) $gallery['title'];
-			}
-		}
-
-		if ( $should_show ) {
-			$this->logger->info( 'shortcode', 'Rendering synced attachment gallery.', array( 'mode' => $mode, 'source_key' => $this->api->build_source_key( $source ), 'attachments' => count( $synced_ids ) ), 'render_synced' );
-			$atts['layout']   = $layout;
-			$atts['captions'] = $captions ? 'true' : 'false';
-			return $this->media_sync->render_synced_gallery( $synced_ids, $atts, $this->render_pagination( $gallery, $query_arg ) );
-		}
-
-		if ( ! is_array( $gallery ) ) {
-			$gallery = $this->api->get_gallery_data( $source );
-		}
+		$gallery = $this->api->get_gallery_data( $source );
 		if ( is_wp_error( $gallery ) ) {
-			$this->logger->error( 'shortcode', $gallery->get_error_message(), array( 'mode' => $mode, 'source_key' => $this->api->build_source_key( $source ) ), 'render_remote_error' );
+			$this->logger->error( 'shortcode', $gallery->get_error_message(), array( 'source_key' => $this->api->build_source_key( $source ) ), 'render_error' );
 			return $this->render_error( $gallery->get_error_message() );
 		}
 
 		if ( empty( $gallery['photos'] ) || ! is_array( $gallery['photos'] ) ) {
-			$this->logger->warning( 'shortcode', 'Remote render returned no Flickr photos.', array( 'mode' => $mode, 'source_key' => $this->api->build_source_key( $source ) ), 'render_empty' );
+			$this->logger->warning( 'shortcode', 'Remote render returned no Flickr photos.', array( 'source_key' => $this->api->build_source_key( $source ) ), 'render_empty' );
 			return $this->render_error( __( 'No Flickr images were returned for this gallery.', 'wp-flickr-portfolio' ) );
 		}
 
-		$this->logger->info( 'shortcode', 'Rendering remote Flickr gallery.', array( 'mode' => $mode, 'source_key' => $this->api->build_source_key( $source ), 'photos' => count( $gallery['photos'] ) ), 'render_remote' );
+		$this->logger->info( 'shortcode', 'Rendering remote Flickr gallery.', array( 'source_key' => $this->api->build_source_key( $source ), 'photos' => count( $gallery['photos'] ) ), 'render_remote' );
 
 		wp_enqueue_style( 'wp-flickr-portfolio' );
+		wp_enqueue_script( 'wp-flickr-portfolio-lightbox' );
+		wp_localize_script( 'wp-flickr-portfolio-lightbox', 'wpfpLightbox', array(
+			'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+			'nonce'   => wp_create_nonce( 'wpfp_get_exif' ),
+		) );
 
 		$columns  = max( 1, min( 6, absint( $atts['columns'] ) ) );
 		$title    = $atts['title'] ? (string) $atts['title'] : (string) ( $gallery['title'] ?? '' );
@@ -318,10 +273,12 @@ class WP_Flickr_Portfolio_Shortcode {
 					$image_url    = ! empty( $photo['display_url'] ) ? (string) $photo['display_url'] : ( ! empty( $photo['thumbnail_url'] ) ? (string) $photo['thumbnail_url'] : (string) $full_url );
 					$image_width  = ! empty( $photo['width'] ) ? absint( $photo['width'] ) : 0;
 					$image_height = ! empty( $photo['height'] ) ? absint( $photo['height'] ) : 0;
+					$photo_id     = (string) $photo['id'];
+					$owner        = (string) ( $photo['owner'] ?? '' );
 					?>
 					<figure class="gallery-item wpfp-gallery-item">
 						<div class="gallery-icon landscape">
-							<a href="<?php echo esc_url( $full_url ); ?>" data-flickr-id="<?php echo esc_attr( (string) $photo['id'] ); ?>" data-caption="<?php echo esc_attr( $caption ? $caption : $image_title ); ?>" data-title="<?php echo esc_attr( $image_title ); ?>">
+							<a href="<?php echo esc_url( $full_url ); ?>" data-wpfp-photo-id="<?php echo esc_attr( $photo_id ); ?>" data-wpfp-full-url="<?php echo esc_attr( $full_url ); ?>" data-wpfp-title="<?php echo esc_attr( $image_title ); ?>" data-wpfp-owner="<?php echo esc_attr( $owner ); ?>" data-caption="<?php echo esc_attr( $caption ? $caption : $image_title ); ?>" data-title="<?php echo esc_attr( $image_title ); ?>">
 								<img src="<?php echo esc_url( $image_url ); ?>" alt="<?php echo esc_attr( $image_title ); ?>" loading="lazy"<?php echo $image_width ? ' width="' . esc_attr( (string) $image_width ) . '"' : ''; ?><?php echo $image_height ? ' height="' . esc_attr( (string) $image_height ) . '"' : ''; ?>>
 							</a>
 						</div>

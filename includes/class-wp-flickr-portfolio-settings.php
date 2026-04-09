@@ -25,16 +25,6 @@ class WP_Flickr_Portfolio_Settings {
 	const AUTH_OPTION_NAME = 'wpfp_auth';
 
 	/**
-	 * Synced source map option name.
-	 */
-	const SYNCED_SOURCES_OPTION = 'wpfp_synced_sources';
-
-	/**
-	 * Scheduled source registry option name.
-	 */
-	const SCHEDULED_SOURCES_OPTION = 'wpfp_scheduled_sources';
-
-	/**
 	 * Shared logger.
 	 *
 	 * @var WP_Flickr_Portfolio_Logger
@@ -56,11 +46,8 @@ class WP_Flickr_Portfolio_Settings {
 			'username'           => '',
 			'fullname'           => '',
 			'cache_ttl'          => 900,
-			'default_mode'       => 'remote',
 			'default_per_page'   => 24,
 			'default_layout'     => 'grid',
-			'allow_resized_fallback' => false,
-			'lightbox_selector'  => '.entry-content, .gallery, .mgl-gallery, .wp-block-gallery',
 		);
 	}
 
@@ -163,7 +150,6 @@ class WP_Flickr_Portfolio_Settings {
 		$auth = array_merge( $defaults, $current, $values );
 		update_option( self::AUTH_OPTION_NAME, $auth, false );
 
-		// Mirror into the main settings array for backward compatibility.
 		$this->update( $auth );
 	}
 
@@ -263,11 +249,8 @@ class WP_Flickr_Portfolio_Settings {
 			'username'           => $current['username'],
 			'fullname'           => $current['fullname'],
 			'cache_ttl'          => isset( $input['cache_ttl'] ) ? max( 60, absint( $input['cache_ttl'] ) ) : (int) $current['cache_ttl'],
-			'default_mode'       => isset( $input['default_mode'] ) && in_array( $input['default_mode'], array( 'remote', 'media', 'auto', 'lazy' ), true ) ? $input['default_mode'] : $current['default_mode'],
 			'default_per_page'   => isset( $input['default_per_page'] ) ? min( 500, max( 1, absint( $input['default_per_page'] ) ) ) : (int) $current['default_per_page'],
 			'default_layout'     => isset( $input['default_layout'] ) ? $this->normalize_layout( $input['default_layout'] ) : $this->normalize_layout( $current['default_layout'] ),
-			'allow_resized_fallback' => ! empty( $input['allow_resized_fallback'] ),
-			'lightbox_selector'  => isset( $input['lightbox_selector'] ) ? sanitize_text_field( (string) $input['lightbox_selector'] ) : $current['lightbox_selector'],
 		);
 
 		return $sanitized;
@@ -283,36 +266,19 @@ class WP_Flickr_Portfolio_Settings {
 			return;
 		}
 
-		$options           = $this->get_all();
-		$layout_value      = $this->normalize_layout( $options['default_layout'] );
-		$connected_user    = $options['fullname'] ? $options['fullname'] : $options['username'];
-		$callback_url      = $this->admin_page_url( array( 'wpfp_oauth_callback' => '1' ) );
-		$sync_examples     = array(
+		$options        = $this->get_all();
+		$layout_value   = $this->normalize_layout( $options['default_layout'] );
+		$connected_user = $options['fullname'] ? $options['fullname'] : $options['username'];
+		$callback_url   = $this->admin_page_url( array( 'wpfp_oauth_callback' => '1' ) );
+		$sync_examples  = array(
 			'[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001"]',
 			'[flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18"]',
-			'[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]',
-		);
-		$scheduled_sources = $this->get_scheduled_sources();
-		$has_active_sync   = $this->has_active_scheduled_sources( $scheduled_sources );
-		$source_defaults   = array(
-			'source'         => 'photoset',
-			'user_id'        => (string) $options['user_nsid'],
-			'photoset_id'    => '',
-			'per_page'       => (int) $options['default_per_page'],
-			'privacy_filter' => 1,
 		);
 		?>
 
 		<div class="wrap">
 			<h1><?php esc_html_e( 'WP Flickr Portfolio', 'wp-flickr-portfolio' ); ?></h1>
 			<?php $this->render_notice(); ?>
-			<?php if ( $has_active_sync ) : ?>
-				<script>
-					window.setTimeout(function () {
-						window.location.reload();
-					}, 5000);
-				</script>
-			<?php endif; ?>
 
 			<form method="post" action="options.php">
 				<?php settings_fields( 'wpfp_settings_group' ); ?>
@@ -335,40 +301,12 @@ class WP_Flickr_Portfolio_Settings {
 							<td><input id="wpfp_default_per_page" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[default_per_page]" type="number" min="1" max="500" value="<?php echo esc_attr( (string) $options['default_per_page'] ); ?>"></td>
 						</tr>
 						<tr>
-							<th scope="row"><label for="wpfp_default_mode"><?php esc_html_e( 'Default gallery mode', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<select id="wpfp_default_mode" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[default_mode]">
-									<option value="remote" <?php selected( $options['default_mode'], 'remote' ); ?>><?php esc_html_e( 'Remote Flickr URLs', 'wp-flickr-portfolio' ); ?></option>
-									<option value="media" <?php selected( $options['default_mode'], 'media' ); ?>><?php esc_html_e( 'Imported media only', 'wp-flickr-portfolio' ); ?></option>
-									<option value="auto" <?php selected( $options['default_mode'], 'auto' ); ?>><?php esc_html_e( 'Imported media fallback to remote', 'wp-flickr-portfolio' ); ?></option>
-									<option value="lazy" <?php selected( $options['default_mode'], 'lazy' ); ?>><?php esc_html_e( 'Lazy sync attachments on first view', 'wp-flickr-portfolio' ); ?></option>
-								</select>
-							</td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpfp_default_layout"><?php esc_html_e( 'Default remote layout', 'wp-flickr-portfolio' ); ?></label></th>
+							<th scope="row"><label for="wpfp_default_layout"><?php esc_html_e( 'Default layout', 'wp-flickr-portfolio' ); ?></label></th>
 							<td>
 								<select id="wpfp_default_layout" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[default_layout]">
 									<option value="grid" <?php selected( $layout_value, 'grid' ); ?>><?php esc_html_e( 'Grid', 'wp-flickr-portfolio' ); ?></option>
 									<option value="masonry" <?php selected( $layout_value, 'masonry' ); ?>><?php esc_html_e( 'Masonry', 'wp-flickr-portfolio' ); ?></option>
 								</select>
-							</td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpfp_allow_resized_fallback"><?php esc_html_e( 'Media import fallback', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<label for="wpfp_allow_resized_fallback">
-									<input id="wpfp_allow_resized_fallback" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[allow_resized_fallback]" type="checkbox" value="1" <?php checked( ! empty( $options['allow_resized_fallback'] ) ); ?>>
-									<?php esc_html_e( 'Allow importing Flickr display-size images when the original file cannot be downloaded.', 'wp-flickr-portfolio' ); ?>
-								</label>
-								<p class="description"><?php esc_html_e( 'Leave this disabled to preserve full resolution and EXIF by requiring the original Flickr file for Media Library imports.', 'wp-flickr-portfolio' ); ?></p>
-							</td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpfp_lightbox_selector"><?php esc_html_e( 'Expected Meow Lightbox selector', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<input class="regular-text" id="wpfp_lightbox_selector" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[lightbox_selector]" type="text" value="<?php echo esc_attr( $options['lightbox_selector'] ); ?>">
-								<p class="description"><?php esc_html_e( 'This plugin renders galleries with the .gallery class so Meow Lightbox can detect them using its default selector.', 'wp-flickr-portfolio' ); ?></p>
 							</td>
 						</tr>
 					</tbody>
@@ -402,90 +340,6 @@ class WP_Flickr_Portfolio_Settings {
 				<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_disconnect_oauth' ), 'wpfp_disconnect_oauth' ) ); ?>"><?php esc_html_e( 'Disconnect Flickr', 'wp-flickr-portfolio' ); ?></a>
 				<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_clear_cache' ), 'wpfp_clear_cache' ) ); ?>"><?php esc_html_e( 'Clear Cached Flickr Data', 'wp-flickr-portfolio' ); ?></a>
 			</p>
-
-			<hr>
-
-			<h2><?php esc_html_e( 'Scheduled Sync', 'wp-flickr-portfolio' ); ?></h2>
-			<p><?php esc_html_e( 'Keep selected Flickr sources up to date with a scheduled WP-Cron sync. Flickr documents a shared limit of 3600 queries per hour per API key, so this plugin spaces uncached REST and original-file download requests, retries bounded 429 responses, and runs queued imports in the background.', 'wp-flickr-portfolio' ); ?></p>
-			<?php if ( $has_active_sync ) : ?>
-				<p class="description"><?php esc_html_e( 'This page refreshes automatically while a scheduled sync is queued or running so progress stays current.', 'wp-flickr-portfolio' ); ?></p>
-			<?php endif; ?>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-				<input type="hidden" name="action" value="wpfp_save_scheduled_source">
-				<?php wp_nonce_field( 'wpfp_save_scheduled_source' ); ?>
-				<table class="form-table" role="presentation">
-					<tbody>
-						<?php $this->render_source_fields( $source_defaults, 'scheduled' ); ?>
-						<tr>
-							<th scope="row"><label for="wpfp_scheduled_refresh_existing"><?php esc_html_e( 'Refresh existing imports', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<label for="wpfp_scheduled_refresh_existing">
-									<input id="wpfp_scheduled_refresh_existing" name="refresh_existing" type="checkbox" value="1">
-									<?php esc_html_e( 'Update metadata on attachments that are already in the Media Library during scheduled runs.', 'wp-flickr-portfolio' ); ?>
-								</label>
-							</td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpfp_scheduled_schedule"><?php esc_html_e( 'Schedule', 'wp-flickr-portfolio' ); ?></label></th>
-							<td>
-								<select id="wpfp_scheduled_schedule" name="schedule">
-									<?php foreach ( WP_Flickr_Portfolio_Media_Sync::get_valid_schedules() as $key ) : ?>
-										<option value="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( WP_Flickr_Portfolio_Media_Sync::get_schedule_label( $key ) ); ?></option>
-									<?php endforeach; ?>
-								</select>
-							</td>
-						</tr>
-					</tbody>
-				</table>
-				<?php submit_button( __( 'Add Scheduled Source', 'wp-flickr-portfolio' ), 'secondary' ); ?>
-			</form>
-
-			<?php if ( ! empty( $scheduled_sources ) ) : ?>
-				<h3><?php esc_html_e( 'Scheduled Sources', 'wp-flickr-portfolio' ); ?></h3>
-				<table class="widefat striped">
-					<thead>
-						<tr>
-							<th><?php esc_html_e( 'Source', 'wp-flickr-portfolio' ); ?></th>
-							<th><?php esc_html_e( 'Items / Page', 'wp-flickr-portfolio' ); ?></th>
-							<th><?php esc_html_e( 'Schedule', 'wp-flickr-portfolio' ); ?></th>
-							<th><?php esc_html_e( 'Refresh Existing', 'wp-flickr-portfolio' ); ?></th>
-							<th><?php esc_html_e( 'Last Run', 'wp-flickr-portfolio' ); ?></th>
-							<th><?php esc_html_e( 'Status', 'wp-flickr-portfolio' ); ?></th>
-							<th><?php esc_html_e( 'Actions', 'wp-flickr-portfolio' ); ?></th>
-						</tr>
-					</thead>
-					<tbody>
-						<?php foreach ( $scheduled_sources as $record ) : ?>
-							<?php $base_key = isset( $record['base_key'] ) ? (string) $record['base_key'] : ''; ?>
-							<?php if ( ! $base_key ) : ?>
-								<?php continue; ?>
-							<?php endif; ?>
-							<tr>
-								<td><?php echo esc_html( $this->format_source_label( $record ) ); ?></td>
-								<td><?php echo esc_html( (string) ( isset( $record['per_page'] ) ? absint( $record['per_page'] ) : 0 ) ); ?></td>
-								<td><?php echo esc_html( WP_Flickr_Portfolio_Media_Sync::get_schedule_label( $record['schedule'] ?? '' ) ); ?></td>
-								<td><?php echo ! empty( $record['refresh_existing'] ) ? esc_html__( 'Yes', 'wp-flickr-portfolio' ) : esc_html__( 'No', 'wp-flickr-portfolio' ); ?></td>
-								<td><?php echo esc_html( $this->format_last_run( $record ) ); ?></td>
-								<td><?php $this->render_status_cell( $record ); ?></td>
-								<td>
-									<?php $is_active = in_array( (string) ( $record['last_status'] ?? '' ), array( 'queued', 'running' ), true ); ?>
-									<?php if ( $is_active ) : ?>
-										<a class="button button-small button-primary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_stop_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_stop_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Stop', 'wp-flickr-portfolio' ); ?></a>
-									<?php else : ?>
-										<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_run_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_run_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Run Now', 'wp-flickr-portfolio' ); ?></a>
-									<?php endif; ?>
-									<?php if ( ! empty( $record['enabled'] ) ) : ?>
-										<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_toggle_scheduled_source&base_key=' . rawurlencode( $base_key ) . '&enabled=0' ), 'wpfp_toggle_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Disable', 'wp-flickr-portfolio' ); ?></a>
-									<?php else : ?>
-										<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_toggle_scheduled_source&base_key=' . rawurlencode( $base_key ) . '&enabled=1' ), 'wpfp_toggle_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Enable', 'wp-flickr-portfolio' ); ?></a>
-									<?php endif; ?>
-									<a class="button button-small" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_remove_scheduled_source&base_key=' . rawurlencode( $base_key ) ), 'wpfp_remove_scheduled_source_' . $base_key ) ); ?>"><?php esc_html_e( 'Remove', 'wp-flickr-portfolio' ); ?></a>
-								</td>
-							</tr>
-						<?php endforeach; ?>
-					</tbody>
-				</table>
-			<?php endif; ?>
 
 			<hr>
 
@@ -544,7 +398,7 @@ class WP_Flickr_Portfolio_Settings {
 			<h1><?php esc_html_e( 'WP Flickr Portfolio Logs', 'wp-flickr-portfolio' ); ?></h1>
 			<?php $this->render_notice(); ?>
 
-			<p><?php esc_html_e( 'Recent plugin activity is stored in WordPress so sync jobs, Flickr API retries, gallery mode decisions, and import failures can be inspected without server log access.', 'wp-flickr-portfolio' ); ?></p>
+			<p><?php esc_html_e( 'Recent plugin activity is stored in WordPress so gallery rendering, Flickr API retries, and failures can be inspected without server log access.', 'wp-flickr-portfolio' ); ?></p>
 
 			<p>
 				<a class="button" href="<?php echo esc_url( $this->admin_page_url( array( 'page' => 'wp-flickr-portfolio-logs' ) ) ); ?>"><?php esc_html_e( 'Refresh', 'wp-flickr-portfolio' ); ?></a>
@@ -763,201 +617,6 @@ class WP_Flickr_Portfolio_Settings {
 	}
 
 	/**
-	 * Render shared source fields.
-	 *
-	 * @param array<string,mixed> $values Form defaults.
-	 * @param string              $prefix DOM prefix.
-	 * @return void
-	 */
-	private function render_source_fields( array $values, $prefix ) {
-		?>
-		<tr>
-			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_source"><?php esc_html_e( 'Source type', 'wp-flickr-portfolio' ); ?></label></th>
-			<td>
-				<select id="wpfp_<?php echo esc_attr( $prefix ); ?>_source" name="source">
-					<option value="photoset" <?php selected( $values['source'], 'photoset' ); ?>><?php esc_html_e( 'Photoset / Album', 'wp-flickr-portfolio' ); ?></option>
-					<option value="photostream" <?php selected( $values['source'], 'photostream' ); ?>><?php esc_html_e( 'Photostream', 'wp-flickr-portfolio' ); ?></option>
-				</select>
-			</td>
-		</tr>
-		<tr>
-			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_user"><?php esc_html_e( 'User ID', 'wp-flickr-portfolio' ); ?></label></th>
-			<td><input class="regular-text" id="wpfp_<?php echo esc_attr( $prefix ); ?>_user" name="user_id" type="text" value="<?php echo esc_attr( (string) $values['user_id'] ); ?>"></td>
-		</tr>
-		<tr>
-			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_photoset"><?php esc_html_e( 'Photoset ID', 'wp-flickr-portfolio' ); ?></label></th>
-			<td>
-				<input class="regular-text" id="wpfp_<?php echo esc_attr( $prefix ); ?>_photoset" name="photoset_id" type="text" value="<?php echo esc_attr( (string) $values['photoset_id'] ); ?>">
-				<p class="description"><?php esc_html_e( 'Required when the source type is Photoset / Album.', 'wp-flickr-portfolio' ); ?></p>
-			</td>
-		</tr>
-		<tr>
-			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_limit"><?php esc_html_e( 'Items per page', 'wp-flickr-portfolio' ); ?></label></th>
-			<td><input id="wpfp_<?php echo esc_attr( $prefix ); ?>_limit" name="per_page" type="number" min="1" max="500" value="<?php echo esc_attr( (string) absint( $values['per_page'] ) ); ?>"></td>
-		</tr>
-		<tr>
-			<th scope="row"><label for="wpfp_<?php echo esc_attr( $prefix ); ?>_privacy"><?php esc_html_e( 'Privacy filter', 'wp-flickr-portfolio' ); ?></label></th>
-			<td>
-				<select id="wpfp_<?php echo esc_attr( $prefix ); ?>_privacy" name="privacy_filter">
-					<option value="1" <?php selected( (string) $values['privacy_filter'], '1' ); ?>><?php esc_html_e( 'Public', 'wp-flickr-portfolio' ); ?></option>
-					<option value="2" <?php selected( (string) $values['privacy_filter'], '2' ); ?>><?php esc_html_e( 'Friends', 'wp-flickr-portfolio' ); ?></option>
-					<option value="3" <?php selected( (string) $values['privacy_filter'], '3' ); ?>><?php esc_html_e( 'Family', 'wp-flickr-portfolio' ); ?></option>
-					<option value="4" <?php selected( (string) $values['privacy_filter'], '4' ); ?>><?php esc_html_e( 'Friends & family', 'wp-flickr-portfolio' ); ?></option>
-					<option value="5" <?php selected( (string) $values['privacy_filter'], '5' ); ?>><?php esc_html_e( 'Private', 'wp-flickr-portfolio' ); ?></option>
-				</select>
-			</td>
-		</tr>
-		<?php
-	}
-
-	/**
-	 * Return scheduled source records.
-	 *
-	 * @return array<int,array<string,mixed>>
-	 */
-	private function get_scheduled_sources() {
-		$records = get_option( self::SCHEDULED_SOURCES_OPTION, array() );
-		if ( ! is_array( $records ) ) {
-			return array();
-		}
-
-		$scheduled = array();
-		foreach ( $records as $record ) {
-			if ( is_array( $record ) ) {
-				$scheduled[] = $record;
-			}
-		}
-
-		return $scheduled;
-	}
-
-	/**
-	 * Format a source label for admin tables.
-	 *
-	 * @param array<string,mixed> $record Source record.
-	 * @return string
-	 */
-	private function format_source_label( array $record ) {
-		$type = isset( $record['source'] ) && 'photostream' === $record['source']
-			? __( 'Photostream', 'wp-flickr-portfolio' )
-			: __( 'Photoset', 'wp-flickr-portfolio' );
-
-		$pieces = array( $type );
-
-		if ( ! empty( $record['photoset_id'] ) ) {
-			$pieces[] = sprintf(
-				/* translators: %s is a Flickr photoset ID. */
-				__( 'Set %s', 'wp-flickr-portfolio' ),
-				(string) $record['photoset_id']
-			);
-		}
-
-		if ( ! empty( $record['user_id'] ) ) {
-			$pieces[] = sprintf(
-				/* translators: %s is a Flickr user NSID. */
-				__( 'User %s', 'wp-flickr-portfolio' ),
-				(string) $record['user_id']
-			);
-		}
-
-		return implode( ' · ', $pieces );
-	}
-
-	/**
-	 * Format last run timestamp.
-	 *
-	 * @param array<string,mixed> $record Source record.
-	 * @return string
-	 */
-	private function format_last_run( array $record ) {
-		if ( empty( $record['last_run_at'] ) ) {
-			return __( 'Never', 'wp-flickr-portfolio' );
-		}
-
-		return wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), absint( $record['last_run_at'] ) );
-	}
-
-	/**
-	 * Determine whether any scheduled source is queued or running.
-	 *
-	 * @param array<int|string,array<string,mixed>> $scheduled_sources Scheduled source records.
-	 * @return bool
-	 */
-	private function has_active_scheduled_sources( array $scheduled_sources ) {
-		foreach ( $scheduled_sources as $record ) {
-			if ( ! is_array( $record ) ) {
-				continue;
-			}
-
-			if ( in_array( (string) ( $record['last_status'] ?? '' ), array( 'queued', 'running' ), true ) ) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	/**
-	 * Format status text for a scheduled source.
-	 *
-	 * @param array<string,mixed> $record Source record.
-	 * @return string
-	 */
-	private function format_status( array $record ) {
-		$state = ! empty( $record['enabled'] ) ? __( 'Enabled', 'wp-flickr-portfolio' ) : __( 'Disabled', 'wp-flickr-portfolio' );
-
-		if ( ! empty( $record['last_status'] ) ) {
-			if ( 'queued' === $record['last_status'] ) {
-				$state = __( 'Queued', 'wp-flickr-portfolio' );
-			} elseif ( 'running' === $record['last_status'] ) {
-				$state = __( 'Running', 'wp-flickr-portfolio' );
-			} elseif ( 'stopped' === $record['last_status'] ) {
-				$state = __( 'Stopped', 'wp-flickr-portfolio' );
-			}
-		}
-
-		if ( ! empty( $record['last_message'] ) ) {
-			return $state . ' · ' . (string) $record['last_message'];
-		}
-
-		return $state;
-	}
-
-	/**
-	 * Render the scheduled-source status cell, including progress when available.
-	 *
-	 * @param array<string,mixed> $record Source record.
-	 * @return void
-	 */
-	private function render_status_cell( array $record ) {
-		$status = $this->format_status( $record );
-		echo '<div>' . esc_html( $status ) . '</div>';
-
-		$total     = absint( $record['progress_total_items'] ?? 0 );
-		$processed = absint( $record['progress_processed_items'] ?? 0 );
-		if ( $total <= 0 ) {
-			return;
-		}
-
-		$percent = min( 100, max( 0, (int) floor( ( $processed / $total ) * 100 ) ) );
-		$detail  = sprintf(
-			/* translators: 1: progress percent, 2: processed photos, 3: total photos. */
-			__( '%1$d%% · %2$d/%3$d photos', 'wp-flickr-portfolio' ),
-			$percent,
-			$processed,
-			$total
-		);
-		?>
-		<div style="margin-top:6px;max-width:240px;">
-			<div aria-hidden="true" style="height:8px;background:#dcdcde;border-radius:999px;overflow:hidden;">
-				<div style="height:100%;width:<?php echo esc_attr( (string) $percent ); ?>%;background:#2271b1;"></div>
-			</div>
-			<div style="margin-top:4px;font-size:12px;color:#50575e;"><?php echo esc_html( $detail ); ?></div>
-		</div>
-		<?php
-	}
-
-	/**
 	 * Render query-string notice.
 	 *
 	 * @return void
@@ -981,41 +640,12 @@ class WP_Flickr_Portfolio_Settings {
 			case 'cache_cleared':
 				$text = __( 'Cached Flickr responses cleared.', 'wp-flickr-portfolio' );
 				break;
-			case 'schedule_saved':
-				$text = __( 'Scheduled source saved.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_removed':
-				$text = __( 'Scheduled source removed.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_enabled':
-				$text = __( 'Scheduled source enabled.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_disabled':
-				$text = __( 'Scheduled source disabled.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_run_complete':
-				$text = __( 'Scheduled source synced successfully.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_run_queued':
-				$text = __( 'Scheduled source queued to run in the background. Progress will appear in the Scheduled Sources table.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_stopped':
-				$text = __( 'Sync stopped. You can run it again at any time.', 'wp-flickr-portfolio' );
-				break;
 			case 'logs_cleared':
 				$text = __( 'Plugin logs cleared.', 'wp-flickr-portfolio' );
 				break;
 			case 'oauth_error':
 				$type = 'error';
 				$text = __( 'Flickr authorization failed. Check your API credentials and callback URL.', 'wp-flickr-portfolio' );
-				break;
-			case 'sync_error':
-				$type = 'error';
-				$text = __( 'Media sync failed. Check the source values and Flickr authorization state.', 'wp-flickr-portfolio' );
-				break;
-			case 'schedule_error':
-				$type = 'error';
-				$text = __( 'Scheduled sync failed. Review the source settings and Flickr authorization state.', 'wp-flickr-portfolio' );
 				break;
 			case 'missing_credentials':
 				$type = 'error';

@@ -6,10 +6,7 @@ It is intended for future development, maintenance, and deployment work rather t
 
 ## Overview
 
-The plugin integrates a WordPress portfolio site with Flickr and supports two display models:
-
-- Remote rendering: fetch metadata from Flickr, render Flickr-hosted image URLs directly on the frontend, and rely on Meow Lightbox to enhance the gallery markup.
-- Media sync: import Flickr images into the WordPress Media Library so the resulting attachments behave like native WordPress media and can be used naturally by Meow Gallery.
+The plugin integrates a WordPress portfolio site with Flickr and renders remote galleries with a built-in EXIF lightbox.
 
 The current implementation supports:
 
@@ -18,8 +15,7 @@ The current implementation supports:
 - Public access with API key/secret
 - Private access through Flickr OAuth 1.0a with read permissions
 - Cached Flickr responses using WordPress transients
-- Optional metadata refresh for already imported attachments
-- Optional per-source daily scheduled sync using WP-Cron
+- Built-in lightbox with full-size image display and EXIF metadata
 - Rolling plugin-owned operational logs with an admin viewer
 - Shortcode-based frontend output
 - Gutenberg block-based editor insertion
@@ -40,13 +36,13 @@ The current implementation supports:
 `includes/class-wp-flickr-portfolio-plugin.php`
 
 - Initializes the plugin services.
-- Registers the frontend stylesheet.
+- Registers the frontend stylesheet and lightbox script.
 
 `includes/class-wp-flickr-portfolio-settings.php`
 
 - Owns plugin settings.
 - Registers the top-level admin screen.
-- Renders admin UI for credentials, OAuth actions, cache clearing, scheduled sync management, and log viewing.
+- Renders admin UI for credentials, OAuth actions, cache clearing, and log viewing.
 - Logs subpage supports paginated browsing (25 entries per page) and exporting filtered logs as a downloadable text file.
 
 `includes/class-wp-flickr-portfolio-logger.php`
@@ -68,27 +64,28 @@ The current implementation supports:
 - Calls Flickr REST endpoints.
 - Caches gallery payloads.
 - Maps Flickr API responses into a normalized internal gallery payload.
-
-`includes/class-wp-flickr-portfolio-media-sync.php`
-
-- Imports Flickr images into the WordPress Media Library.
-- Avoids duplicate imports by tracking Flickr photo IDs in attachment meta.
-- Stores synced attachment ID lists keyed by source.
-- Loads WordPress media sideload dependencies explicitly.
-- Prefers Flickr's full/original image when available and suppresses intermediate image-size generation to keep imports within typical shared-host limits while preserving the original file bytes.
-- Stores scheduled-source records keyed by logical source.
-- Runs bulk sync jobs through WP-Cron.
+- Provides an AJAX endpoint for fetching photo EXIF data (`flickr.photos.getExif` and `flickr.photos.geo.getLocation`).
 
 `includes/class-wp-flickr-portfolio-shortcode.php`
 
 - Registers `[flickr_portfolio]`.
 - Registers the Gutenberg block.
-- Chooses between remote and synced rendering.
-- Emits `.gallery` markup for Meow Lightbox compatibility.
+- Renders remote Flickr galleries with lightbox data attributes.
+- Enqueues the lightbox script and localizes AJAX configuration.
 
 `assets/wp-flickr-portfolio.css`
 
 - Provides lightweight gallery styling for remote-rendered Flickr grids.
+- Provides full lightbox overlay styling.
+
+`assets/wp-flickr-portfolio-lightbox.js`
+
+- Vanilla JS lightbox: full-screen overlay, full-size image display.
+- Fetches EXIF data via AJAX when the lightbox opens.
+- Renders EXIF info in a bottom bar (camera, lens, aperture, shutter, ISO, focal length, location).
+- Shows a "View on Flickr" link in the header.
+- Supports prev/next navigation with arrow buttons and keyboard arrows.
+- Escape key and click-outside close the lightbox.
 
 ## Current Plugin Behavior
 
@@ -106,33 +103,18 @@ Current settings include:
 - `username`
 - `fullname`
 - `cache_ttl`
-- `default_mode`
 - `default_per_page`
 - `default_layout`
-- `lightbox_selector`
 
 Related options:
 
 - `wpfp_request_token`: temporary Flickr request token data during OAuth
 - `wpfp_cache_keys`: known transient keys for cache invalidation
-- `wpfp_synced_sources`: mapping of normalized source keys to imported attachment IDs
-- `wpfp_scheduled_sources`: registry of scheduled sync sources and their latest run state
 - `wpfp_logs`: rolling plugin-owned operational log entries
 
 ## Recent Notes
 
-- `0.15.0` fixed scheduled sync permanently failing when Flickr's CDN rate-limits original downloads: after exhausting retries the plugin falls back to the large display-size image for that photo, or skips it entirely if the fallback also fails, so the remaining queue always continues. Added a Stop button in the Scheduled Sources table that cancels a queued or running sync without disrupting the recurring cron schedule.
-- `0.14.1` stopped refetching the same Flickr page during deferred rate-limit retries, increased background backoff delays for repeated `429` original-download failures, and added a terminal error when throttling persists across multiple queued attempts.
-- `0.14.0` moved scheduled sync execution into resumable background batches, added persisted per-source progress for the settings UI, and changed Flickr `429` download handling from in-request retries to deferred batch rescheduling.
-- `0.13.1` extended the shared Flickr pacing window to original-file downloads, added bounded retry/backoff for `429` download responses, and improved logs so throttling attempts are visible per photo.
-- `0.13.0` replaced the original-file importer with a plugin-owned transport pipeline, added a cURL retry path after WordPress HTTP failures, and upgraded sync errors/logs to identify the exact photo and transport outcome.
-- `0.12.3` changed the admin `Run Now` action to execute in the current admin request, scheduled recurring jobs to start on their real interval, and updated notices/docs to match the new sync flow.
-- `0.12.2` increased the runtime budget for large original-file imports and added a completion log after a Flickr file finishes downloading, making cron import stalls easier to diagnose.
-- `0.12.1` changed Media Library imports to require Flickr originals by default, added an explicit resized-fallback setting, and improved logging when an original download cannot be preserved.
-- `0.11.0` removed the Manual Media Sync and Import All Pages admin sections. These features are now available through scheduled sync: add a scheduled source and use Run Now to import on demand.
-- `0.10.0` added paginated log browsing (25 entries per page with WordPress-style pagination), log export as a downloadable text file, and removed the redundant View Logs button from the main settings page.
-- `0.9.0` removed `mode="lazy"` and all associated background-sync machinery (WP-Cron per-photo batching, lazy payload transients, original-upgrade jobs, frontend JS poller). The supported sync paths are now manual per-page sync, bulk all-pages import, and scheduled daily sync from the admin screen.
-- `0.7.1` hardened frontend media imports by explicitly loading `download_url()`, `media_handle_sideload()`, and attachment metadata helpers before sideloading Flickr images. This avoids hard failures where one helper had been loaded by WordPress or another plugin but the full import stack had not.
+- `0.16.0` added a built-in lightbox with full-size image display, EXIF metadata (camera, lens, aperture, shutter speed, ISO, focal length, location), a Flickr link, and prev/next keyboard navigation. Removed Meow Lightbox support, media library import, scheduled sync, and all associated settings.
 
 ### OAuth Flow
 
@@ -142,7 +124,6 @@ The admin screen exposes operational actions for:
 - Disconnect Flickr
 - Clear Cached Flickr Data
 - View, filter, paginate, export, and clear plugin logs
-- Scheduled source management
 
 OAuth flow:
 
@@ -176,7 +157,7 @@ If `user_id` is omitted but the plugin is authenticated, the stored Flickr `user
 
 ### Caching
 
-Gallery payloads are cached with WordPress transients.
+Gallery payloads and EXIF data are cached with WordPress transients.
 
 Cache key inputs:
 
@@ -187,7 +168,7 @@ The admin screen includes a manual cache clear action that deletes all tracked t
 
 ### Operational Logging
 
-The plugin now records a capped rolling history of operational log entries in `wpfp_logs`.
+The plugin records a capped rolling history of operational log entries in `wpfp_logs`.
 
 Log entries include:
 
@@ -205,18 +186,9 @@ The Logs admin subpage supports:
 - Exporting filtered or all log entries as a downloadable text file
 - Clearing all retained log entries
 
-The Logs admin subpage is intended to explain:
-
-- Flickr cache hits and misses
-- rate-limit retries
-- shortcode render-mode decisions
-- manual, lazy, and scheduled sync activity
-- attachment import outcomes
-- operational errors without exposing secrets
-
 ### Remote Rendering
 
-Remote rendering is the default mode.
+Remote rendering is the only mode.
 
 Behavior:
 
@@ -228,26 +200,21 @@ Behavior:
 - Include caption/title metadata in rendered attributes and captions.
 - Use the plugin's own grid or masonry wrappers instead of faking masonry with CSS spans.
 - Render pagination links when Flickr reports more than one page.
+- Anchor tags include `data-wpfp-photo-id`, `data-wpfp-full-url`, `data-wpfp-title`, and `data-wpfp-owner` attributes for lightbox integration.
 
-This is designed so Meow Lightbox can attach to the output without requiring a custom integration layer.
+### Lightbox
 
-### Media Sync Rendering
+Clicking a gallery image opens the built-in lightbox:
 
-Media sync is attachment-based.
-
-Behavior:
-
-- Download each Flickr image through WordPress sideloading.
-- Store `_wpfp_flickr_photo_id` on the attachment.
-- Reuse an existing attachment when the Flickr photo ID already exists.
-- Optionally refresh metadata on existing attachments during scheduled sync.
-- Store imported attachment IDs for a normalized per-page source key.
-- Store scheduled-source records using a logical source key that excludes `page`.
-- Render synced galleries through the same plugin gallery structure used by remote mode.
-- Reuse the same frontend pagination component, with exact-page attachment lookup driven by the stored source key and attachment metadata fallback.
-- Pace uncached Flickr REST sync requests conservatively to stay under Flickr's documented shared API-key query limit.
-
-This makes the imported content behave like normal WordPress media and gives Meow Gallery a native path to work with the images.
+- Full-screen dark overlay with the full-size image centered.
+- Bottom bar shows EXIF metadata fetched via AJAX (`wpfp_get_exif`).
+- EXIF data includes camera, lens, aperture, shutter speed, ISO, focal length, and location.
+- Header has a close button and a "View on Flickr" link.
+- Prev/next arrow buttons navigate through gallery images.
+- Keyboard support: Left/Right arrows for prev/next, Escape to close.
+- Click outside the image to close.
+- Loading spinner while the full-size image loads.
+- EXIF data is cached per photo ID in the browser and in WordPress transients.
 
 ## Shortcode Contract
 
@@ -265,7 +232,6 @@ Supported shortcode attributes:
 - `per_page`: items per page
 - `page`: result page
 - `privacy_filter`: Flickr privacy filter from `1` to `5`
-- `mode`: `remote`, `media`, or `auto`
 - `layout`: `grid` or `masonry`
 - `columns`: remote grid column count
 - `captions`: `true` or `false`
@@ -273,12 +239,6 @@ Supported shortcode attributes:
 - `title`: optional display title override
 
 Legacy `layout="tiles"` content is normalized to `masonry` at render time.
-
-Mode semantics:
-
-- `remote`: always render Flickr-hosted images
-- `media`: render imported attachments only for the requested page; show an error block when that page has not been synced yet
-- `auto`: render imported attachments when available, otherwise fall back to remote Flickr output
 
 Pagination semantics:
 
@@ -296,10 +256,6 @@ Examples:
 [flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18"]
 ```
 
-```text
-[flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]
-```
-
 ## Gutenberg Block
 
 The plugin registers a dynamic block:
@@ -308,39 +264,13 @@ The plugin registers a dynamic block:
 
 Current block behavior:
 
-- Uses a native editor sidebar UI for source, mode, layout, title, privacy, page, and per-page settings.
+- Uses a native editor sidebar UI for source, layout, title, privacy, page, and per-page settings.
 - Uses server-side rendering in the editor preview.
 - Reuses the same PHP rendering path as the shortcode, so frontend output stays consistent between shortcode and block usage.
 - Supports Gutenberg `wide` and `full` alignment options.
 - Disables text-below-image captions automatically when the block uses masonry layout.
 - Exposes only `Grid` and `Masonry`; legacy `tiles` blocks preview and render as masonry.
 - Treats the `Page` control as the initial page rather than a fixed non-interactive slice.
-
-## Meow Integration Notes
-
-### Meow Lightbox
-
-Primary frontend integration is through compatible markup, not through Meow internals.
-
-The plugin deliberately renders:
-
-- `.gallery`
-- `.gallery-item`
-- `.gallery-icon`
-- file links to full-size images
-
-That keeps the integration low-risk because Meow Lightbox already supports gallery-like frontend markup.
-
-### Meow Gallery
-
-The plugin does not currently call Meow Gallery internals or private APIs.
-
-Instead, it supports Meow Gallery through imported attachments:
-
-- Sync Flickr images into the Media Library.
-- Use those attachments inside Meow Gallery like any other uploaded image set.
-
-This is the safer integration path for now because it avoids coupling to undocumented plugin internals.
 
 ## Operational Notes
 
@@ -366,13 +296,9 @@ All PHP files pass syntax linting (`php -l`).
 ## Known Limitations
 
 - No automated tests yet.
-- Scheduled sync relies on WP-Cron, so timing depends on site traffic unless a real cron runner is configured.
-- No direct Meow Gallery API integration; attachment-based compatibility is used instead.
 - Error handling is functional but basic; errors are shown as user-facing blocks or admin notices.
 
 ## Recommended Next Work
 
 - Add source presets in admin rather than requiring manual shortcode composition.
 - Add automated tests against a WordPress test environment.
-- Add better attachment grouping metadata so synced sources can be managed more easily in wp-admin.
-- Evaluate whether Meow Gallery exposes a stable public extension point worth integrating directly.
