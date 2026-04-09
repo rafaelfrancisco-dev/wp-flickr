@@ -90,6 +90,7 @@ class WP_Flickr_Portfolio_Settings {
 		add_action( 'admin_menu', array( $this, 'register_menu' ) );
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_wpfp_clear_logs', array( $this, 'handle_clear_logs' ) );
+		add_action( 'admin_post_wpfp_export_logs', array( $this, 'handle_export_logs' ) );
 	}
 
 	/**
@@ -300,10 +301,10 @@ class WP_Flickr_Portfolio_Settings {
 			'privacy_filter' => 1,
 		);
 		?>
+
 		<div class="wrap">
 			<h1><?php esc_html_e( 'WP Flickr Portfolio', 'wp-flickr-portfolio' ); ?></h1>
 			<?php $this->render_notice(); ?>
-			<p><a class="button" href="<?php echo esc_url( $this->admin_page_url( array( 'page' => 'wp-flickr-portfolio-logs' ) ) ); ?>"><?php esc_html_e( 'View Logs', 'wp-flickr-portfolio' ); ?></a></p>
 
 			<form method="post" action="options.php">
 				<?php settings_fields( 'wpfp_settings_group' ); ?>
@@ -528,16 +529,36 @@ class WP_Flickr_Portfolio_Settings {
 			return;
 		}
 
-		$level     = isset( $_GET['wpfp_log_level'] ) ? sanitize_key( wp_unslash( $_GET['wpfp_log_level'] ) ) : '';
-		$component = isset( $_GET['wpfp_log_component'] ) ? sanitize_key( wp_unslash( $_GET['wpfp_log_component'] ) ) : '';
+		$level       = isset( $_GET['wpfp_log_level'] ) ? sanitize_key( wp_unslash( $_GET['wpfp_log_level'] ) ) : '';
+		$component   = isset( $_GET['wpfp_log_component'] ) ? sanitize_key( wp_unslash( $_GET['wpfp_log_component'] ) ) : '';
+		$per_page    = 25;
+		$current_page = isset( $_GET['wpfp_paged'] ) ? max( 1, absint( $_GET['wpfp_paged'] ) ) : 1;
+		$filters     = array(
+			'level'     => $level,
+			'component' => $component,
+		);
+
+		$total_items = $this->logger->get_total_count( $filters );
+		$total_pages = (int) ceil( $total_items / $per_page );
+
+		if ( $current_page > $total_pages && $total_pages > 0 ) {
+			$current_page = $total_pages;
+		}
+
+		$offset    = ( $current_page - 1 ) * $per_page;
 		$entries   = $this->logger->get_entries(
-			array(
-				'level'     => $level,
-				'component' => $component,
-				'limit'     => 200,
+			array_merge(
+				$filters,
+				array(
+					'limit'  => $per_page,
+					'offset' => $offset,
+				)
 			)
 		);
 		$components = $this->logger->get_components();
+
+		$showing_from = $total_items > 0 ? $offset + 1 : 0;
+		$showing_to   = min( $offset + $per_page, $total_items );
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'WP Flickr Portfolio Logs', 'wp-flickr-portfolio' ); ?></h1>
@@ -549,6 +570,7 @@ class WP_Flickr_Portfolio_Settings {
 				<a class="button" href="<?php echo esc_url( $this->admin_page_url( array( 'page' => 'wp-flickr-portfolio-logs' ) ) ); ?>"><?php esc_html_e( 'Refresh', 'wp-flickr-portfolio' ); ?></a>
 				<a class="button" href="<?php echo esc_url( $this->admin_page_url() ); ?>"><?php esc_html_e( 'Back to Settings', 'wp-flickr-portfolio' ); ?></a>
 				<a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_clear_logs' ), 'wpfp_clear_logs' ) ); ?>" onclick="return window.confirm('<?php echo esc_js( __( 'Clear all retained WP Flickr Portfolio log entries?', 'wp-flickr-portfolio' ) ); ?>');"><?php esc_html_e( 'Clear Logs', 'wp-flickr-portfolio' ); ?></a>
+				<a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpfp_export_logs&wpfp_log_level=' . rawurlencode( $level ) . '&wpfp_log_component=' . rawurlencode( $component ) ), 'wpfp_export_logs' ) ); ?>"><?php esc_html_e( 'Export Logs', 'wp-flickr-portfolio' ); ?></a>
 			</p>
 
 			<form method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>" style="margin:16px 0;">
@@ -569,6 +591,20 @@ class WP_Flickr_Portfolio_Settings {
 				</select>
 				<?php submit_button( __( 'Filter', 'wp-flickr-portfolio' ), 'secondary', '', false ); ?>
 			</form>
+
+			<?php if ( $total_items > 0 ) : ?>
+				<p class="wpfp-showing-entries">
+					<?php
+					printf(
+						/* translators: 1: starting entry number, 2: ending entry number, 3: total entries. */
+						esc_html__( 'Showing %1$d - %2$d of %3$d entries', 'wp-flickr-portfolio' ),
+						$showing_from,
+						$showing_to,
+						$total_items
+					);
+					?>
+				</p>
+			<?php endif; ?>
 
 			<table class="widefat striped">
 				<thead>
@@ -604,6 +640,41 @@ class WP_Flickr_Portfolio_Settings {
 					<?php endif; ?>
 				</tbody>
 			</table>
+
+			<?php if ( $total_pages > 1 ) : ?>
+				<div class="tablenav bottom">
+					<div class="tablenav-pages">
+						<span class="displaying-num">
+							<?php
+							printf(
+								/* translators: %d: total number of log entries. */
+								esc_html( _n( '%d item', '%d items', $total_items, 'wp-flickr-portfolio' ) ),
+								$total_items
+							);
+							?>
+						</span>
+						<span class="pagination-links">
+							<?php
+							echo paginate_links(
+								array(
+									'base'      => add_query_arg( 'wpfp_paged', '%#%' ),
+									'format'    => '',
+									'prev_text' => '&laquo;',
+									'next_text' => '&raquo;',
+									'total'     => $total_pages,
+									'current'   => $current_page,
+									'add_args'  => array(
+										'page'              => 'wp-flickr-portfolio-logs',
+										'wpfp_log_level'    => $level,
+										'wpfp_log_component' => $component,
+									),
+								)
+							);
+							?>
+						</span>
+					</div>
+				</div>
+			<?php endif; ?>
 		</div>
 		<?php
 	}
@@ -629,6 +700,69 @@ class WP_Flickr_Portfolio_Settings {
 				)
 			)
 		);
+		exit;
+	}
+
+	/**
+	 * Export all log entries as a downloadable text file.
+	 *
+	 * @return void
+	 */
+	public function handle_export_logs() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You are not allowed to do this.', 'wp-flickr-portfolio' ) );
+		}
+
+		check_admin_referer( 'wpfp_export_logs' );
+
+		$level     = isset( $_GET['wpfp_log_level'] ) ? sanitize_key( wp_unslash( $_GET['wpfp_log_level'] ) ) : '';
+		$component = isset( $_GET['wpfp_log_component'] ) ? sanitize_key( wp_unslash( $_GET['wpfp_log_component'] ) ) : '';
+
+		$entries = $this->logger->get_entries(
+			array(
+				'level'     => $level,
+				'component' => $component,
+				'limit'     => WP_Flickr_Portfolio_Logger::MAX_ENTRIES,
+			)
+		);
+
+		$lines = array();
+		$date_format = 'Y-m-d H:i:s';
+
+		foreach ( $entries as $entry ) {
+			$timestamp = isset( $entry['timestamp'] ) ? gmdate( $date_format, absint( $entry['timestamp'] ) ) : '';
+			$log_level = isset( $entry['level'] ) ? strtoupper( $entry['level'] ) : 'INFO';
+			$comp      = isset( $entry['component'] ) ? $entry['component'] : '';
+			$message   = isset( $entry['message'] ) ? $entry['message'] : '';
+			$context   = '';
+			$event     = isset( $entry['event'] ) ? $entry['event'] : '';
+
+			if ( ! empty( $entry['context'] ) && is_array( $entry['context'] ) ) {
+				$json = wp_json_encode( $entry['context'], JSON_UNESCAPED_SLASHES );
+				if ( is_string( $json ) ) {
+					$context = $json;
+				}
+			}
+
+			$line = "[{$timestamp}] [{$log_level}] [{$comp}] {$message}";
+			if ( $event ) {
+				$line .= " | event: {$event}";
+			}
+			if ( $context ) {
+				$line .= " | {$context}";
+			}
+
+			$lines[] = $line;
+		}
+
+		$filename = 'wp-flickr-portfolio-logs.txt';
+		$content  = implode( PHP_EOL, $lines );
+
+		header( 'Content-Type: text/plain; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename=' . $filename );
+		header( 'Content-Length: ' . strlen( $content ) );
+
+		echo $content;
 		exit;
 	}
 

@@ -49,11 +49,13 @@ The current implementation supports:
 - Owns plugin settings.
 - Registers the top-level admin screen.
 - Renders admin UI for credentials, OAuth actions, cache clearing, manual sync, bulk sync, scheduled sync management, and log viewing.
+- Logs subpage supports paginated browsing (25 entries per page) and exporting filtered logs as a downloadable text file.
 
 `includes/class-wp-flickr-portfolio-logger.php`
 
 - Persists a capped rolling history of operational log entries in WordPress.
 - Sanitizes log context before persistence.
+- Supports filtered entry retrieval with offset-based pagination.
 - Feeds the plugin Logs admin subpage.
 
 `includes/class-wp-flickr-portfolio-oauth.php`
@@ -121,6 +123,7 @@ Related options:
 
 ## Recent Notes
 
+- `0.10.0` added paginated log browsing (25 entries per page with WordPress-style pagination), log export as a downloadable text file, and removed the redundant View Logs button from the main settings page.
 - `0.9.0` removed `mode="lazy"` and all associated background-sync machinery (WP-Cron per-photo batching, lazy payload transients, original-upgrade jobs, frontend JS poller). The supported sync paths are now manual per-page sync, bulk all-pages import, and scheduled daily sync from the admin screen.
 - `0.7.1` hardened frontend media imports by explicitly loading `download_url()`, `media_handle_sideload()`, and attachment metadata helpers before sideloading Flickr images. This avoids hard failures where one helper had been loaded by WordPress or another plugin but the full import stack had not.
 
@@ -131,7 +134,7 @@ The admin screen exposes operational actions for:
 - Connect Flickr
 - Disconnect Flickr
 - Clear Cached Flickr Data
-- View and clear plugin logs
+- View, filter, paginate, export, and clear plugin logs
 - Manual page sync
 - Bulk import all pages
 - Scheduled source management
@@ -189,6 +192,13 @@ Log entries include:
 - event key
 - message
 - compact sanitized context
+
+The Logs admin subpage supports:
+
+- Filtering by level and component
+- Paginated browsing with 25 entries per page and WordPress-style pagination links
+- Exporting filtered or all log entries as a downloadable text file
+- Clearing all retained log entries
 
 The Logs admin subpage is intended to explain:
 
@@ -342,7 +352,7 @@ This is the safer integration path for now because it avoids coupling to undocum
 
 The repository currently includes an installable ZIP:
 
-`wp-flickr-portfolio-0.9.0.zip`
+`wp-flickr-portfolio-0.10.0.zip`
 
 That ZIP contains the expected top-level plugin folder:
 

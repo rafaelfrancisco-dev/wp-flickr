@@ -13,7 +13,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Queue lazy one-page imports from frontend gallery views with `mode="lazy"` and progressively switch those items to local attachments in the browser as imports finish.
 - Refresh metadata for already imported Flickr attachments when syncing.
 - Keep selected Flickr sources in sync with optional daily scheduled sync and background `Run Now`.
-- Inspect recent plugin activity from a dedicated admin Logs screen.
+- Inspect recent plugin activity from a dedicated admin Logs screen with pagination, filtering, and text-file export.
 - Use remote galleries with Meow Lightbox via standard `.gallery` markup.
 - Use imported attachments with Meow Gallery through the normal WordPress gallery flow.
 - Offer two layout modes: uniform `grid` and aspect-ratio-preserving `masonry`.

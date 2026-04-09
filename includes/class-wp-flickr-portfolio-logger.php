@@ -105,16 +105,39 @@ class WP_Flickr_Portfolio_Logger {
 	}
 
 	/**
+	 * Return the total number of entries matching the given filters.
+	 *
+	 * @param array<string,mixed> $filters Optional filters.
+	 * @return int
+	 */
+	public function get_total_count( array $filters = array() ) {
+		return count( $this->get_filtered_entries( $filters ) );
+	}
+
+	/**
 	 * Return filtered log entries in reverse chronological order.
 	 *
 	 * @param array<string,mixed> $filters Optional filters.
 	 * @return array<int,array<string,mixed>>
 	 */
 	public function get_entries( array $filters = array() ) {
-		$entries = array_reverse( $this->get_raw_entries() );
-		$level   = isset( $filters['level'] ) ? $this->normalize_level( $filters['level'] ) : '';
-		$component = isset( $filters['component'] ) ? sanitize_key( (string) $filters['component'] ) : '';
+		$entries = $this->get_filtered_entries( $filters );
 		$limit   = isset( $filters['limit'] ) ? max( 1, absint( $filters['limit'] ) ) : self::MAX_ENTRIES;
+		$offset  = isset( $filters['offset'] ) ? max( 0, absint( $filters['offset'] ) ) : 0;
+
+		return array_slice( $entries, $offset, $limit );
+	}
+
+	/**
+	 * Return all filtered entries (before offset/limit) in reverse chronological order.
+	 *
+	 * @param array<string,mixed> $filters Optional filters.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function get_filtered_entries( array $filters = array() ) {
+		$entries   = array_reverse( $this->get_raw_entries() );
+		$level     = isset( $filters['level'] ) ? $this->normalize_level( $filters['level'] ) : '';
+		$component = isset( $filters['component'] ) ? sanitize_key( (string) $filters['component'] ) : '';
 
 		if ( $level ) {
 			$entries = array_values(
@@ -138,7 +161,7 @@ class WP_Flickr_Portfolio_Logger {
 			);
 		}
 
-		return array_slice( $entries, 0, $limit );
+		return $entries;
 	}
 
 	/**

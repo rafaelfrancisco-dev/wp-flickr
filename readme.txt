@@ -4,7 +4,7 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.9.0
+Stable tag: 0.10.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -23,6 +23,8 @@ Features:
 - Optional metadata refresh for already imported Flickr attachments.
 - Optional daily scheduled sync for selected Flickr sources with background run-now support.
 - Dedicated admin log viewer for recent plugin activity.
+- Paginated log browsing with level and component filters.
+- Export filtered log entries as a downloadable text file.
 - Gallery markup that fits Meow Lightbox's default selectors.
 - Attachment-based galleries that work naturally with Meow Gallery after sync.
 - Frontend pagination links that work without JavaScript.
@@ -79,9 +81,15 @@ Yes. The plugin registers a `Flickr Portfolio` block so editors can configure ga
 
 = Is there a debug log viewer? =
 
-Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures.
+Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database history of recent operational events such as Flickr API requests, sync queueing, lazy mode decisions, imports, retries, and failures. The log viewer supports paginated browsing (25 entries per page), filtering by level and component, and exporting filtered entries as a text file.
 
 == Changelog ==
+
+= 0.10.0 =
+
+- Added paginated log browsing (25 entries per page) with WordPress-style pagination links.
+- Added log export as a downloadable text file, respecting active level and component filters.
+- Removed the redundant View Logs button from the main settings page (the sidebar Logs submenu already links there).
 
 = 0.9.0 =
 
