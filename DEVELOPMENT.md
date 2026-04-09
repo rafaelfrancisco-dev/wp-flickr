@@ -121,6 +121,7 @@ Related options:
 
 ## Recent Notes
 
+- `0.13.0` replaced the original-file importer with a plugin-owned transport pipeline, added a cURL retry path after WordPress HTTP failures, and upgraded sync errors/logs to identify the exact photo and transport outcome.
 - `0.12.3` changed the admin `Run Now` action to execute in the current admin request, scheduled recurring jobs to start on their real interval, and updated notices/docs to match the new sync flow.
 - `0.12.2` increased the runtime budget for large original-file imports and added a completion log after a Flickr file finishes downloading, making cron import stalls easier to diagnose.
 - `0.12.1` changed Media Library imports to require Flickr originals by default, added an explicit resized-fallback setting, and improved logging when an original download cannot be preserved.

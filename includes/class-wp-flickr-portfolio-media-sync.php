@@ -15,6 +15,11 @@ class WP_Flickr_Portfolio_Media_Sync {
 	const IMPORT_DOWNLOAD_TIMEOUT = 300;
 
 	/**
+	 * Maximum redirects to follow when downloading Flickr originals.
+	 */
+	const IMPORT_DOWNLOAD_REDIRECTS = 5;
+
+	/**
 	 * Legacy manual run-now cron hook kept for already queued events.
 	 */
 	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
@@ -821,80 +826,67 @@ class WP_Flickr_Portfolio_Media_Sync {
 			return new WP_Error( 'wpfp_missing_photo_url', __( 'Flickr did not provide a downloadable image URL for this photo.', 'wp-flickr-portfolio' ) );
 		}
 
-		$source_url = (string) $import_source['url'];
-
-		$this->logger->info(
-			'media_sync',
-			'Downloading Flickr photo for Media Library import.',
-			array(
-				'photo_id'       => (string) $photo['id'],
-				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
-				'url'            => $source_url,
-				'timeout'        => self::IMPORT_DOWNLOAD_TIMEOUT,
-			),
-			'import_download_start'
-		);
-
 		$this->ensure_media_import_dependencies();
-		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
+		$download = $this->download_import_source( $photo, $import_source );
 
-		$temp_file = download_url( $source_url, self::IMPORT_DOWNLOAD_TIMEOUT );
-
-		// Optionally fall back to Flickr display sizes when the original download fails.
-		if ( is_wp_error( $temp_file ) && $allow_resized_fallback && 'full_url' === ( $import_source['variant'] ?? '' ) && ! empty( $photo['display_url'] ) && (string) $photo['display_url'] !== $source_url ) {
+		if ( is_wp_error( $download ) && $allow_resized_fallback && 'full_url' === ( $import_source['variant'] ?? '' ) && ! empty( $photo['display_url'] ) && (string) $photo['display_url'] !== (string) $import_source['url'] ) {
 			$this->logger->warning(
 				'media_sync',
 				'Flickr original download failed, retrying with display URL.',
 				array(
 					'photo_id' => (string) $photo['id'],
-					'code'     => $temp_file->get_error_code(),
-					'error'    => $temp_file->get_error_message(),
+					'code'     => $download->get_error_code(),
+					'error'    => $download->get_error_message(),
 				),
 				'original_download_fallback'
 			);
-			$source_url    = (string) $photo['display_url'];
-			$import_source = array( 'variant' => 'display_url', 'url' => $source_url );
-			$temp_file     = download_url( $source_url, self::IMPORT_DOWNLOAD_TIMEOUT );
-		} elseif ( is_wp_error( $temp_file ) && 'full_url' === ( $import_source['variant'] ?? '' ) && ! $allow_resized_fallback ) {
+
+			$import_source = array(
+				'variant' => 'display_url',
+				'url'     => (string) $photo['display_url'],
+			);
+			$download      = $this->download_import_source( $photo, $import_source );
+		}
+
+		if ( is_wp_error( $download ) ) {
+			if ( 'full_url' === ( $import_source['variant'] ?? '' ) && ! $allow_resized_fallback ) {
+				$this->logger->error(
+					'media_sync',
+					'Flickr original download failed and resized fallback is disabled.',
+					array(
+						'photo_id' => (string) $photo['id'],
+						'code'     => $download->get_error_code(),
+						'error'    => $download->get_error_message(),
+					),
+					'original_download_required'
+				);
+			}
+
 			$this->logger->error(
 				'media_sync',
-				'Flickr original download failed and resized fallback is disabled.',
+				$download->get_error_message(),
 				array(
 					'photo_id' => (string) $photo['id'],
-					'code'     => $temp_file->get_error_code(),
-					'error'    => $temp_file->get_error_message(),
+					'code'     => $download->get_error_code(),
 				),
-				'original_download_required'
+				'import_failed'
 			);
 
 			return new WP_Error(
-				'wpfp_original_download_required',
-				__( 'Flickr original download failed, and importing smaller fallback sizes is disabled.', 'wp-flickr-portfolio' )
+				$download->get_error_code(),
+				sprintf(
+					/* translators: 1: Flickr photo ID, 2: download failure detail. */
+					__( 'Photo %1$s failed: %2$s', 'wp-flickr-portfolio' ),
+					(string) $photo['id'],
+					$download->get_error_message()
+				)
 			);
 		}
 
-		if ( is_wp_error( $temp_file ) ) {
-			$this->logger->error( 'media_sync', $temp_file->get_error_message(), array( 'photo_id' => (string) $photo['id'], 'code' => $temp_file->get_error_code() ), 'download_failed' );
-			return $temp_file;
-		}
-
-		$this->logger->info(
-			'media_sync',
-			'Downloaded Flickr photo for Media Library import.',
-			array(
-				'photo_id'       => (string) $photo['id'],
-				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
-				'bytes'          => file_exists( $temp_file ) ? (int) @filesize( $temp_file ) : 0,
-			),
-			'import_download_complete'
-		);
-
-		$path      = wp_parse_url( $source_url, PHP_URL_PATH );
-		$basename  = $path ? basename( (string) $path ) : (string) $photo['id'] . '.jpg';
-		$file_name = sanitize_file_name( (string) $photo['id'] . '-' . $basename );
+		$file_name = isset( $download['file_name'] ) ? (string) $download['file_name'] : $this->build_import_file_name( (string) $photo['id'], (string) $import_source['url'] );
 		$file      = array(
 			'name'     => $file_name,
-			'tmp_name' => $temp_file,
+			'tmp_name' => (string) $download['tmp_name'],
 		);
 
 		$attachment_args = array(
@@ -910,6 +902,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 				'photo_id'       => (string) $photo['id'],
 				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
 				'file_name'      => $file_name,
+				'bytes'          => isset( $download['bytes_written'] ) ? absint( $download['bytes_written'] ) : 0,
 			),
 			'import_sideload_start'
 		);
@@ -938,7 +931,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 		}
 
 		if ( is_wp_error( $attachment_id ) ) {
-			@unlink( $temp_file );
+			$this->cleanup_import_temp_file( (string) $download['tmp_name'] );
 			$this->logger->error( 'media_sync', $attachment_id->get_error_message(), array( 'photo_id' => (string) $photo['id'], 'code' => $attachment_id->get_error_code() ), 'sideload_failed' );
 			return $attachment_id;
 		}
@@ -959,7 +952,7 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 * @return void
 	 */
 	private function ensure_media_import_dependencies() {
-		if ( ! function_exists( 'download_url' ) ) {
+		if ( ! function_exists( 'wp_tempnam' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/file.php';
 		}
 
@@ -969,6 +962,403 @@ class WP_Flickr_Portfolio_Media_Sync {
 
 		if ( ! function_exists( 'wp_generate_attachment_metadata' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/image.php';
+		}
+	}
+
+	/**
+	 * Download one Flickr image variant to a validated temporary file.
+	 *
+	 * @param array<string,mixed>  $photo Flickr photo payload.
+	 * @param array<string,string> $import_source Selected import source.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function download_import_source( array $photo, array $import_source ) {
+		$photo_id       = (string) $photo['id'];
+		$requested_url  = (string) ( $import_source['url'] ?? '' );
+		$import_variant = (string) ( $import_source['variant'] ?? '' );
+		$file_name      = $this->build_import_file_name( $photo_id, $requested_url );
+		$temp_file      = wp_tempnam( $file_name );
+
+		if ( ! $temp_file || ! is_string( $temp_file ) ) {
+			return new WP_Error( 'wpfp_import_temp_file_failed', __( 'Could not create a temporary file for the Flickr import.', 'wp-flickr-portfolio' ) );
+		}
+
+		$this->logger->info(
+			'media_sync',
+			'Downloading Flickr photo for Media Library import.',
+			array(
+				'photo_id'       => $photo_id,
+				'import_variant' => $import_variant,
+				'url'            => $requested_url,
+				'timeout'        => self::IMPORT_DOWNLOAD_TIMEOUT,
+			),
+			'import_download_start'
+		);
+
+		$this->prepare_long_running_runtime( self::IMPORT_DOWNLOAD_TIMEOUT + 60 );
+
+		$result = $this->download_with_wordpress_http( $requested_url, $temp_file );
+		if ( is_wp_error( $result ) && function_exists( 'curl_init' ) ) {
+			$this->cleanup_import_temp_file( $temp_file );
+			$this->logger->warning(
+				'media_sync',
+				'WordPress HTTP download failed, retrying with cURL.',
+				array(
+					'photo_id'       => $photo_id,
+					'import_variant' => $import_variant,
+					'url'            => $requested_url,
+					'code'           => $result->get_error_code(),
+					'error'          => $result->get_error_message(),
+				),
+				'import_transport_retry'
+			);
+			$result = $this->download_with_curl( $requested_url, $temp_file );
+		}
+
+		if ( is_wp_error( $result ) ) {
+			$this->cleanup_import_temp_file( $temp_file );
+			return $result;
+		}
+
+		$result['tmp_name']   = $temp_file;
+		$result['file_name']  = $file_name;
+		$result['photo_id']   = $photo_id;
+		$result['requested_url'] = $requested_url;
+		$result['variant']    = $import_variant;
+
+		$this->logger->info(
+			'media_sync',
+			'Received Flickr import HTTP response.',
+			$this->download_log_context( $result ),
+			'import_http_response'
+		);
+
+		$validation = $this->validate_import_download( $result );
+		if ( is_wp_error( $validation ) ) {
+			$this->logger->error(
+				'media_sync',
+				$validation->get_error_message(),
+				array_merge(
+					$this->download_log_context( $result ),
+					array(
+						'code' => $validation->get_error_code(),
+					)
+				),
+				'import_validation_failed'
+			);
+			$this->cleanup_import_temp_file( $temp_file );
+			return $validation;
+		}
+
+		$this->logger->info(
+			'media_sync',
+			'Downloaded Flickr photo for Media Library import.',
+			$this->download_log_context( $result ),
+			'import_download_complete'
+		);
+
+		return $result;
+	}
+
+	/**
+	 * Download a Flickr file using the WordPress HTTP API with explicit streaming.
+	 *
+	 * @param string $url Flickr URL.
+	 * @param string $temp_file Temporary destination path.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function download_with_wordpress_http( $url, $temp_file ) {
+		$response = wp_safe_remote_get(
+			$url,
+			array(
+				'timeout'     => self::IMPORT_DOWNLOAD_TIMEOUT,
+				'redirection' => self::IMPORT_DOWNLOAD_REDIRECTS,
+				'stream'      => true,
+				'filename'    => $temp_file,
+				'decompress'  => false,
+				'user-agent'  => $this->import_user_agent(),
+				'headers'     => $this->import_request_headers(),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error(
+				'wpfp_original_transport_request_failed',
+				sprintf(
+					/* translators: %s: transport error message. */
+					__( 'Flickr original download request failed: %s', 'wp-flickr-portfolio' ),
+					$response->get_error_message()
+				)
+			);
+		}
+
+		$result = array(
+			'transport'       => 'wordpress_http',
+			'response_code'   => absint( wp_remote_retrieve_response_code( $response ) ),
+			'content_type'    => (string) wp_remote_retrieve_header( $response, 'content-type' ),
+			'content_length'  => absint( wp_remote_retrieve_header( $response, 'content-length' ) ),
+			'final_url'       => $this->extract_final_response_url( $response, $url ),
+			'bytes_written'   => file_exists( $temp_file ) ? (int) @filesize( $temp_file ) : 0,
+		);
+
+		return $result;
+	}
+
+	/**
+	 * Retry a Flickr file download with cURL when the default HTTP stack fails.
+	 *
+	 * @param string $url Flickr URL.
+	 * @param string $temp_file Temporary destination path.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function download_with_curl( $url, $temp_file ) {
+		$handle = fopen( $temp_file, 'w+b' );
+		if ( false === $handle ) {
+			return new WP_Error( 'wpfp_original_transport_temp_open_failed', __( 'Could not open the temporary Flickr import file for writing.', 'wp-flickr-portfolio' ) );
+		}
+
+		$headers = array();
+		foreach ( $this->import_request_headers() as $name => $value ) {
+			$headers[] = $name . ': ' . $value;
+		}
+
+		$curl = curl_init( $url );
+		if ( false === $curl ) {
+			fclose( $handle );
+			return new WP_Error( 'wpfp_original_transport_curl_init_failed', __( 'Could not initialize the cURL downloader for the Flickr import.', 'wp-flickr-portfolio' ) );
+		}
+
+		$response_headers = array();
+		$final_url        = $url;
+		$content_type     = '';
+		$content_length   = 0;
+
+		curl_setopt( $curl, CURLOPT_FILE, $handle );
+		curl_setopt( $curl, CURLOPT_FOLLOWLOCATION, true );
+		curl_setopt( $curl, CURLOPT_MAXREDIRS, self::IMPORT_DOWNLOAD_REDIRECTS );
+		curl_setopt( $curl, CURLOPT_TIMEOUT, self::IMPORT_DOWNLOAD_TIMEOUT );
+		curl_setopt( $curl, CURLOPT_CONNECTTIMEOUT, 30 );
+		curl_setopt( $curl, CURLOPT_FAILONERROR, false );
+		curl_setopt( $curl, CURLOPT_HTTPHEADER, $headers );
+		curl_setopt( $curl, CURLOPT_USERAGENT, $this->import_user_agent() );
+		curl_setopt( $curl, CURLOPT_SSL_VERIFYPEER, true );
+		curl_setopt( $curl, CURLOPT_SSL_VERIFYHOST, 2 );
+		curl_setopt(
+			$curl,
+			CURLOPT_HEADERFUNCTION,
+			static function( $curl_handle, $header_line ) use ( &$response_headers ) {
+				$length = strlen( $header_line );
+				$header = explode( ':', $header_line, 2 );
+				if ( 2 === count( $header ) ) {
+					$response_headers[ strtolower( trim( $header[0] ) ) ] = trim( $header[1] );
+				}
+
+				return $length;
+			}
+		);
+
+		$executed = curl_exec( $curl );
+		$error_no = curl_errno( $curl );
+		$error    = curl_error( $curl );
+		$code     = absint( curl_getinfo( $curl, CURLINFO_RESPONSE_CODE ) );
+		$final    = curl_getinfo( $curl, CURLINFO_EFFECTIVE_URL );
+		$type     = curl_getinfo( $curl, CURLINFO_CONTENT_TYPE );
+
+		if ( is_string( $final ) && $final ) {
+			$final_url = $final;
+		}
+
+		if ( is_string( $type ) && $type ) {
+			$content_type = $type;
+		} elseif ( ! empty( $response_headers['content-type'] ) ) {
+			$content_type = (string) $response_headers['content-type'];
+		}
+
+		if ( ! empty( $response_headers['content-length'] ) ) {
+			$content_length = absint( $response_headers['content-length'] );
+		}
+
+		curl_close( $curl );
+		fflush( $handle );
+		fclose( $handle );
+
+		$result = array(
+			'transport'      => 'curl',
+			'response_code'  => $code,
+			'content_type'   => $content_type,
+			'content_length' => $content_length,
+			'final_url'      => $final_url,
+			'bytes_written'  => file_exists( $temp_file ) ? (int) @filesize( $temp_file ) : 0,
+		);
+
+		if ( false === $executed || $error_no ) {
+			return new WP_Error(
+				'wpfp_original_transport_request_failed',
+				sprintf(
+					/* translators: %s: transport error message. */
+					__( 'Flickr original download request failed: %s', 'wp-flickr-portfolio' ),
+					$error ? $error : __( 'Unknown cURL error.', 'wp-flickr-portfolio' )
+				)
+			);
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Validate a completed import download before sideloading it into WordPress.
+	 *
+	 * @param array<string,mixed> $download Download result.
+	 * @return true|\WP_Error
+	 */
+	private function validate_import_download( array $download ) {
+		$temp_file = isset( $download['tmp_name'] ) ? (string) $download['tmp_name'] : '';
+
+		if ( ! $temp_file || ! file_exists( $temp_file ) ) {
+			return new WP_Error( 'wpfp_original_transport_missing_file', __( 'Flickr original download did not produce a local file.', 'wp-flickr-portfolio' ) );
+		}
+
+		$response_code = isset( $download['response_code'] ) ? absint( $download['response_code'] ) : 0;
+		if ( 200 !== $response_code ) {
+			return new WP_Error(
+				'wpfp_original_transport_http_status',
+				sprintf(
+					/* translators: %d: HTTP response code. */
+					__( 'Flickr original download returned HTTP %d.', 'wp-flickr-portfolio' ),
+					$response_code
+				)
+			);
+		}
+
+		$bytes_written = isset( $download['bytes_written'] ) ? absint( $download['bytes_written'] ) : 0;
+		if ( $bytes_written <= 0 ) {
+			return new WP_Error( 'wpfp_original_transport_empty_file', __( 'Flickr original download produced an empty file.', 'wp-flickr-portfolio' ) );
+		}
+
+		$content_length = isset( $download['content_length'] ) ? absint( $download['content_length'] ) : 0;
+		if ( $content_length > 0 && $bytes_written < $content_length ) {
+			return new WP_Error(
+				'wpfp_original_transport_truncated',
+				sprintf(
+					/* translators: 1: written bytes, 2: expected bytes. */
+					__( 'Flickr original download appears truncated (%1$d of %2$d bytes).', 'wp-flickr-portfolio' ),
+					$bytes_written,
+					$content_length
+				)
+			);
+		}
+
+		$content_type = strtolower( (string) ( $download['content_type'] ?? '' ) );
+		if ( $content_type && 0 !== strpos( $content_type, 'image/' ) && false === strpos( $content_type, 'application/octet-stream' ) ) {
+			return new WP_Error(
+				'wpfp_original_transport_invalid_type',
+				sprintf(
+					/* translators: %s: response content type. */
+					__( 'Flickr original download returned an unexpected content type: %s', 'wp-flickr-portfolio' ),
+					$content_type
+				)
+			);
+		}
+
+		if ( function_exists( 'wp_get_image_mime' ) ) {
+			$image_mime = wp_get_image_mime( $temp_file );
+			if ( ! $image_mime || 0 !== strpos( (string) $image_mime, 'image/' ) ) {
+				return new WP_Error( 'wpfp_original_transport_invalid_image', __( 'Flickr original download did not produce a valid image file.', 'wp-flickr-portfolio' ) );
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Build a normalized file name for a Flickr import.
+	 *
+	 * @param string $photo_id Flickr photo ID.
+	 * @param string $source_url Download URL.
+	 * @return string
+	 */
+	private function build_import_file_name( $photo_id, $source_url ) {
+		$path     = wp_parse_url( $source_url, PHP_URL_PATH );
+		$basename = $path ? basename( (string) $path ) : $photo_id . '.jpg';
+
+		return sanitize_file_name( $photo_id . '-' . $basename );
+	}
+
+	/**
+	 * Build consistent headers for Flickr import requests.
+	 *
+	 * @return array<string,string>
+	 */
+	private function import_request_headers() {
+		return array(
+			'Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+		);
+	}
+
+	/**
+	 * Build a deterministic user agent for Flickr import requests.
+	 *
+	 * @return string
+	 */
+	private function import_user_agent() {
+		return sprintf(
+			'WP Flickr Portfolio/%1$s; WordPress/%2$s; %3$s',
+			defined( 'WPFLICKRPORTFOLIO_VERSION' ) ? WPFLICKRPORTFOLIO_VERSION : 'dev',
+			get_bloginfo( 'version' ),
+			home_url( '/' )
+		);
+	}
+
+	/**
+	 * Extract the effective response URL from a WordPress HTTP response when available.
+	 *
+	 * @param array<string,mixed> $response Response array.
+	 * @param string              $fallback Requested URL.
+	 * @return string
+	 */
+	private function extract_final_response_url( array $response, $fallback ) {
+		if ( empty( $response['http_response'] ) || ! is_object( $response['http_response'] ) || ! method_exists( $response['http_response'], 'get_response_object' ) ) {
+			return (string) $fallback;
+		}
+
+		$response_object = $response['http_response']->get_response_object();
+		if ( is_object( $response_object ) && ! empty( $response_object->url ) && is_string( $response_object->url ) ) {
+			return $response_object->url;
+		}
+
+		return (string) $fallback;
+	}
+
+	/**
+	 * Build a standard logging payload for a completed download attempt.
+	 *
+	 * @param array<string,mixed> $download Download result.
+	 * @return array<string,mixed>
+	 */
+	private function download_log_context( array $download ) {
+		return array(
+			'photo_id'       => isset( $download['photo_id'] ) ? (string) $download['photo_id'] : '',
+			'import_variant' => isset( $download['variant'] ) ? (string) $download['variant'] : '',
+			'url'            => isset( $download['requested_url'] ) ? (string) $download['requested_url'] : '',
+			'final_url'      => isset( $download['final_url'] ) ? (string) $download['final_url'] : '',
+			'response_code'  => isset( $download['response_code'] ) ? absint( $download['response_code'] ) : 0,
+			'content_type'   => isset( $download['content_type'] ) ? (string) $download['content_type'] : '',
+			'content_length' => isset( $download['content_length'] ) ? absint( $download['content_length'] ) : 0,
+			'bytes_written'  => isset( $download['bytes_written'] ) ? absint( $download['bytes_written'] ) : 0,
+			'file_name'      => isset( $download['file_name'] ) ? (string) $download['file_name'] : '',
+			'transport'      => isset( $download['transport'] ) ? (string) $download['transport'] : '',
+		);
+	}
+
+	/**
+	 * Delete a temporary import file when it is no longer needed.
+	 *
+	 * @param string $temp_file Temporary path.
+	 * @return void
+	 */
+	private function cleanup_import_temp_file( $temp_file ) {
+		if ( $temp_file && file_exists( $temp_file ) ) {
+			@unlink( $temp_file );
 		}
 	}
 

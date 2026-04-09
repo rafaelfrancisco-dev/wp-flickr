@@ -69,6 +69,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Scheduled sync uses WordPress cron for recurring runs. `Run Now` executes immediately in the admin request instead of relying on a background WP-Cron loopback.
 - Flickr documents a shared API-key limit of `3600 queries per hour`, so uncached sync requests are paced conservatively.
 - Scheduled sync prefers Flickr's full/original file when available, so the local full-size attachment keeps the original image bytes and any embedded EXIF that Flickr preserved in that file.
+- Original-file imports now use a plugin-owned downloader with explicit HTTP response logging, file validation, and a cURL retry path when the default WordPress transport fails.
 - Media imports now require the Flickr original by default. A new admin setting can re-enable fallback to smaller Flickr display sizes if you explicitly want that behavior.
 - Attachment-backed modes are matched against the exact source configuration, including `source`, `user_id`, `photoset_id`, `per_page`, `page`, and `privacy_filter`.
 - The `Logs` admin screen keeps a rolling in-database history of recent plugin events so debugging does not depend on server log access.
