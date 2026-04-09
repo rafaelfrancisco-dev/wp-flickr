@@ -203,7 +203,7 @@ class WP_Flickr_Portfolio_Shortcode {
 			return $this->render_error( $source->get_error_message() );
 		}
 
-		$mode       = in_array( $atts['mode'], array( 'remote', 'media', 'auto', 'lazy' ), true ) ? $atts['mode'] : 'remote';
+		$mode       = in_array( $atts['mode'], array( 'remote', 'media', 'auto' ), true ) ? $atts['mode'] : 'remote';
 		$layout     = $this->settings->normalize_layout( $atts['layout'] );
 		$captions   = filter_var( $atts['captions'], FILTER_VALIDATE_BOOLEAN );
 		$captions   = 'masonry' === $layout ? false : $captions;
@@ -226,7 +226,7 @@ class WP_Flickr_Portfolio_Shortcode {
 			'render_start'
 		);
 
-		if ( in_array( $mode, array( 'media', 'auto', 'lazy' ), true ) ) {
+		if ( in_array( $mode, array( 'media', 'auto' ), true ) ) {
 			$gallery = $this->api->get_gallery_data( $source );
 			if ( ! is_wp_error( $gallery ) && ! empty( $gallery['photos'] ) && is_array( $gallery['photos'] ) ) {
 				$expected_photo_count = count( $gallery['photos'] );
@@ -234,28 +234,7 @@ class WP_Flickr_Portfolio_Shortcode {
 			}
 		}
 
-		if ( 'lazy' === $mode && ! $has_synced ) {
-			$this->media_sync->queue_lazy_sync(
-				$source,
-				array(
-					'gallery'          => is_array( $gallery ) ? $gallery : null,
-					'prefer_original'  => false,
-					'upgrade_original' => true,
-					'refresh_existing' => false,
-				)
-			);
-			$this->logger->info(
-				'shortcode',
-				'Lazy mode queued a background page import and will render remote markup until local attachments are ready.',
-				array(
-					'source_key'     => $this->api->build_source_key( $source ),
-					'expected_count' => $expected_photo_count,
-				),
-				'lazy_background_queued'
-			);
-		}
-
-		$should_show = in_array( $mode, array( 'media', 'auto', 'lazy' ), true ) && $has_synced;
+		$should_show = in_array( $mode, array( 'media', 'auto' ), true ) && $has_synced;
 
 		if ( 'media' === $mode && ! $has_synced ) {
 			$this->logger->warning( 'shortcode', 'Media mode blocked because the requested page is not synced.', array( 'source_key' => $this->api->build_source_key( $source ) ), 'media_unsynced' );
@@ -291,10 +270,6 @@ class WP_Flickr_Portfolio_Shortcode {
 		$this->logger->info( 'shortcode', 'Rendering remote Flickr gallery.', array( 'mode' => $mode, 'source_key' => $this->api->build_source_key( $source ), 'photos' => count( $gallery['photos'] ) ), 'render_remote' );
 
 		wp_enqueue_style( 'wp-flickr-portfolio' );
-		$is_lazy_pending = 'lazy' === $mode && ! $has_synced;
-		if ( $is_lazy_pending ) {
-			$this->enqueue_lazy_frontend_script();
-		}
 
 		$columns  = max( 1, min( 6, absint( $atts['columns'] ) ) );
 		$title    = $atts['title'] ? (string) $atts['title'] : (string) ( $gallery['title'] ?? '' );
@@ -326,7 +301,7 @@ class WP_Flickr_Portfolio_Shortcode {
 
 		ob_start();
 		?>
-		<div class="<?php echo esc_attr( implode( ' ', $classes ) ); ?>" data-wpfp-source="<?php echo esc_attr( (string) $source['source'] ); ?>"<?php echo $is_lazy_pending ? ' data-wpfp-mode="lazy" data-wpfp-lazy-state="pending" data-wpfp-source-config="' . esc_attr( wp_json_encode( $source ) ) . '" data-wpfp-expected-count="' . esc_attr( (string) count( $gallery['photos'] ) ) . '"' : ''; ?>>
+		<div class="<?php echo esc_attr( implode( ' ', $classes ) ); ?>" data-wpfp-source="<?php echo esc_attr( (string) $source['source'] ); ?>">
 			<?php if ( $title ) : ?>
 				<h3 class="wpfp-gallery-title"><?php echo esc_html( $title ); ?></h3>
 			<?php endif; ?>
@@ -366,23 +341,6 @@ class WP_Flickr_Portfolio_Shortcode {
 		<?php
 
 		return (string) ob_get_clean();
-	}
-
-	/**
-	 * Enqueue the frontend lazy-sync updater.
-	 *
-	 * @return void
-	 */
-	private function enqueue_lazy_frontend_script() {
-		wp_enqueue_script( 'wp-flickr-portfolio-lazy' );
-		wp_localize_script(
-			'wp-flickr-portfolio-lazy',
-			'WPFlickrPortfolioLazy',
-			array(
-				'statusUrl'    => admin_url( 'admin-ajax.php' ),
-				'pollInterval' => 2500,
-			)
-		);
 	}
 
 	/**

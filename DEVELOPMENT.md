@@ -20,7 +20,6 @@ The current implementation supports:
 - Cached Flickr responses using WordPress transients
 - Manual per-page sync from the admin UI
 - Bulk all-pages import for a Flickr source
-- Lazy per-page background import triggered by frontend gallery views, with a frontend poller that swaps remote items to local attachments as imports land and optional follow-up upgrades to Flickr originals
 - Optional metadata refresh for already imported attachments
 - Optional per-source daily scheduled sync using WP-Cron
 - Rolling plugin-owned operational logs with an admin viewer
@@ -75,11 +74,8 @@ The current implementation supports:
 - Imports Flickr images into the WordPress Media Library.
 - Avoids duplicate imports by tracking Flickr photo IDs in attachment meta.
 - Stores synced attachment ID lists keyed by source.
-- Queues and executes lazy one-page sync jobs through WP-Cron.
-- Exposes a public lazy-sync status endpoint for frontend progressive replacement.
-- Loads WordPress media sideload dependencies explicitly so frontend-triggered imports can run outside wp-admin safely.
-- Manual and scheduled sync import Flickr's full/original image when available and suppress intermediate image-size generation to keep media sync within typical shared-host limits while preserving the original file bytes.
-- Lazy sync imports Flickr's display-sized image first for faster first localization, then queues one-photo background upgrades to the original file where available.
+- Loads WordPress media sideload dependencies explicitly.
+- Prefers Flickr's full/original image when available and suppresses intermediate image-size generation to keep imports within typical shared-host limits while preserving the original file bytes.
 - Stores scheduled-source records keyed by logical source.
 - Runs bulk sync jobs manually and through WP-Cron.
 
@@ -93,11 +89,6 @@ The current implementation supports:
 `assets/wp-flickr-portfolio.css`
 
 - Provides lightweight gallery styling for remote-rendered Flickr grids.
-
-`assets/wp-flickr-portfolio-lazy.js`
-
-- Polls the plugin's lazy-sync status endpoint on unsynced lazy galleries.
-- Replaces remote Flickr URLs with local WordPress attachment URLs as imports complete.
 
 ## Current Plugin Behavior
 
@@ -130,9 +121,7 @@ Related options:
 
 ## Recent Notes
 
-- `0.8.1` changed lazy sync to localize pages quickly with display-sized imports and then queue one-photo background upgrades to Flickr originals so the first local switch is fast without giving up the eventual original file.
-- `0.8.0` changed lazy mode to render remote markup immediately, queue the import in the background, and progressively swap items to local attachments in the browser as the worker imports them. Media imports now prefer Flickr's full/original URL again when available.
-- `0.7.2` switched Media Library imports to Flickr's display-size URL and disables intermediate WordPress image-size generation during sideload so lazy/background imports are less likely to die on memory or processing limits.
+- `0.9.0` removed `mode="lazy"` and all associated background-sync machinery (WP-Cron per-photo batching, lazy payload transients, original-upgrade jobs, frontend JS poller). The supported sync paths are now manual per-page sync, bulk all-pages import, and scheduled daily sync from the admin screen.
 - `0.7.1` hardened frontend media imports by explicitly loading `download_url()`, `media_handle_sideload()`, and attachment metadata helpers before sideloading Flickr images. This avoids hard failures where one helper had been loaded by WordPress or another plugin but the full import stack had not.
 
 ### OAuth Flow
@@ -261,7 +250,7 @@ Supported shortcode attributes:
 - `per_page`: items per page
 - `page`: result page
 - `privacy_filter`: Flickr privacy filter from `1` to `5`
-- `mode`: `remote`, `media`, `auto`, or `lazy`
+- `mode`: `remote`, `media`, or `auto`
 - `layout`: `grid` or `masonry`
 - `columns`: remote grid column count
 - `captions`: `true` or `false`
@@ -275,7 +264,6 @@ Mode semantics:
 - `remote`: always render Flickr-hosted images
 - `media`: render imported attachments only for the requested page; show an error block when that page has not been synced yet
 - `auto`: render imported attachments when available, otherwise fall back to remote Flickr output
-- `lazy`: behave like `auto`, but first try an immediate one-page import when that page has not been synced yet, then queue a background retry if the inline import cannot complete
 
 Pagination semantics:
 
@@ -295,10 +283,6 @@ Examples:
 
 ```text
 [flickr_portfolio source="photoset" user_id="12345678@N00" photoset_id="72157700000000001" mode="auto"]
-```
-
-```text
-[flickr_portfolio source="photostream" user_id="12345678@N00" per_page="18" mode="lazy"]
 ```
 
 ## Gutenberg Block
@@ -358,7 +342,7 @@ This is the safer integration path for now because it avoids coupling to undocum
 
 The repository currently includes an installable ZIP:
 
-`wp-flickr-portfolio-0.7.0.zip`
+`wp-flickr-portfolio-0.9.0.zip`
 
 That ZIP contains the expected top-level plugin folder:
 
@@ -366,17 +350,7 @@ That ZIP contains the expected top-level plugin folder:
 
 ### Validation Completed
 
-The plugin has been syntax-checked with:
-
-- `php -l wp-flickr-portfolio.php`
-- `php -l includes/class-wp-flickr-portfolio-plugin.php`
-- `php -l includes/class-wp-flickr-portfolio-settings.php`
-- `php -l includes/class-wp-flickr-portfolio-oauth.php`
-- `php -l includes/class-wp-flickr-portfolio-api.php`
-- `php -l includes/class-wp-flickr-portfolio-media-sync.php`
-- `php -l includes/class-wp-flickr-portfolio-shortcode.php`
-
-All current PHP files pass syntax linting.
+All PHP files pass syntax linting (`php -l`).
 
 ## Known Limitations
 

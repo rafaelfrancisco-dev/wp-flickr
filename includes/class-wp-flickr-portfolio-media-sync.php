@@ -10,25 +10,6 @@ if ( ! defined( 'ABSPATH' ) ) {
 class WP_Flickr_Portfolio_Media_Sync {
 
 	/**
-	 * Lazy page sync cron hook.
-	 */
-	const LAZY_SYNC_HOOK = 'wpfp_run_lazy_source_event';
-
-	/**
-	 * Upgrade an imported attachment to Flickr's original file.
-	 */
-	const ORIGINAL_UPGRADE_HOOK = 'wpfp_upgrade_flickr_attachment_original_event';
-
-	/**
-	 * Number of photos to process per incremental lazy sync batch.
-	 *
-	 * The first implementation keeps the whole job in one worker run, but this
-	 * constant remains here so the lazy status poller can reason about progress
-	 * against a stable expected count.
-	 */
-	const LAZY_SYNC_BATCH_SIZE = 24;
-
-	/**
 	 * Manual run-now cron hook.
 	 */
 	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
@@ -47,11 +28,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 * Lock lifetime for one scheduled sync run.
 	 */
 	const SCHEDULE_LOCK_TTL = 30 * MINUTE_IN_SECONDS;
-
-	/**
-	 * Lifetime for one queued lazy sync payload.
-	 */
-	const LAZY_SYNC_PAYLOAD_TTL = DAY_IN_SECONDS;
 
 	/**
 	 * Settings manager.
@@ -92,12 +68,8 @@ class WP_Flickr_Portfolio_Media_Sync {
 		add_action( 'admin_post_wpfp_remove_scheduled_source', array( $this, 'handle_remove_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_toggle_scheduled_source', array( $this, 'handle_toggle_scheduled_source' ) );
 		add_action( 'admin_post_wpfp_run_scheduled_source', array( $this, 'handle_run_scheduled_source' ) );
-		add_action( self::LAZY_SYNC_HOOK, array( $this, 'handle_lazy_sync_source' ), 10, 1 );
-		add_action( self::ORIGINAL_UPGRADE_HOOK, array( $this, 'handle_original_upgrade' ), 10, 1 );
 		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
 		add_action( self::CRON_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
-		add_action( 'wp_ajax_wpfp_lazy_status', array( $this, 'handle_lazy_status_request' ) );
-		add_action( 'wp_ajax_nopriv_wpfp_lazy_status', array( $this, 'handle_lazy_status_request' ) );
 	}
 
 	/**
@@ -170,55 +142,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 		} finally {
 			delete_transient( $lock_key );
 		}
-	}
-
-	/**
-	 * Queue a one-page lazy sync for the provided source.
-	 *
-	 * @param array<string,mixed> $source Source arguments.
-	 * @param array<string,mixed> $options Sync options.
-	 * @return bool
-	 */
-	public function queue_lazy_sync( array $source, array $options = array() ) {
-		$normalized = $this->api->normalize_source_args( $source );
-		if ( is_wp_error( $normalized ) ) {
-			$this->logger->error( 'media_sync', $normalized->get_error_message(), array( 'source' => $source ), 'lazy_queue_normalize_error' );
-			return false;
-		}
-
-		$source_key = $this->api->build_source_key( $normalized );
-		if ( get_transient( $this->source_sync_lock_key( $source_key ) ) ) {
-			$this->logger->warning( 'media_sync', 'Skipped lazy queue because the source page is already syncing.', $this->source_log_context( $normalized ), 'lazy_queue_locked' );
-			return false;
-		}
-
-		if ( ! empty( $this->get_synced_attachment_ids( $normalized ) ) ) {
-			$this->logger->debug( 'media_sync', 'Skipped lazy queue because the source page is already synced.', $this->source_log_context( $normalized ), 'lazy_queue_existing' );
-			return false;
-		}
-
-		set_transient(
-			$this->lazy_sync_payload_key( $source_key ),
-			array(
-				'source'  => $normalized,
-				'gallery' => isset( $options['gallery'] ) && is_array( $options['gallery'] ) ? $options['gallery'] : null,
-				'options' => array(
-					'refresh_existing' => ! empty( $options['refresh_existing'] ),
-					'prefer_original'  => ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'],
-					'upgrade_original' => ! empty( $options['upgrade_original'] ),
-				),
-			),
-			self::LAZY_SYNC_PAYLOAD_TTL
-		);
-
-		if ( ! wp_next_scheduled( self::LAZY_SYNC_HOOK, array( $source_key ) ) ) {
-			wp_schedule_single_event( time(), self::LAZY_SYNC_HOOK, array( $source_key ) );
-		}
-
-		$this->maybe_spawn_cron();
-		$this->logger->info( 'media_sync', 'Queued lazy sync for the requested gallery page.', $this->source_log_context( $normalized ), 'lazy_queue_created' );
-
-		return true;
 	}
 
 	/**
@@ -608,197 +531,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	}
 
 	/**
-	 * Handle queued lazy sync runs for a single gallery page.
-	 *
-	 * @param string $source_key Source-page key.
-	 * @return void
-	 */
-	public function handle_lazy_sync_source( $source_key ) {
-		$source_key = (string) $source_key;
-		if ( ! $source_key ) {
-			return;
-		}
-
-		$payload = get_transient( $this->lazy_sync_payload_key( $source_key ) );
-		if ( ! is_array( $payload ) || empty( $payload['source'] ) || ! is_array( $payload['source'] ) ) {
-			delete_transient( $this->lazy_sync_payload_key( $source_key ) );
-			$this->logger->warning( 'media_sync', 'Lazy sync payload was missing or invalid.', array( 'source_key' => $source_key ), 'lazy_payload_missing' );
-			return;
-		}
-
-		$lock_key = $this->source_sync_lock_key( $source_key );
-		if ( get_transient( $lock_key ) ) {
-			$this->logger->warning( 'media_sync', 'Lazy sync skipped because the source page is already locked.', array_merge( $this->source_log_context( $payload['source'] ), array( 'source_key' => $source_key ) ), 'lazy_locked' );
-			return;
-		}
-
-		set_transient( $lock_key, time(), self::SOURCE_SYNC_LOCK_TTL );
-
-		try {
-			$gallery = isset( $payload['gallery'] ) && is_array( $payload['gallery'] ) ? $payload['gallery'] : $this->api->get_gallery_data( $payload['source'], true );
-			if ( is_wp_error( $gallery ) ) {
-				$this->logger->error( 'media_sync', $gallery->get_error_message(), array_merge( $this->source_log_context( $payload['source'] ), array( 'code' => $gallery->get_error_code() ) ), 'lazy_gallery_fetch_failed' );
-				return;
-			}
-
-			$result = $this->sync_gallery_payload(
-				$gallery,
-				isset( $payload['options'] ) && is_array( $payload['options'] ) ? $payload['options'] : array()
-			);
-			if ( is_wp_error( $result ) ) {
-				$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $payload['source'] ), array( 'code' => $result->get_error_code() ) ), 'lazy_sync_failed' );
-			} else {
-				$this->logger->info( 'media_sync', 'Lazy sync completed in background.', array_merge( $this->source_log_context( $payload['source'] ), array( 'attachments' => absint( $result['attachments'] ?? 0 ) ) ), 'lazy_sync_complete' );
-			}
-		} finally {
-			delete_transient( $lock_key );
-			delete_transient( $this->lazy_sync_payload_key( $source_key ) );
-		}
-	}
-
-	/**
-	 * Upgrade one imported attachment from Flickr's display image to the original file.
-	 *
-	 * @param string $payload_key Upgrade payload key.
-	 * @return void
-	 */
-	public function handle_original_upgrade( $payload_key ) {
-		$payload_key = (string) $payload_key;
-		if ( '' === $payload_key ) {
-			return;
-		}
-
-		$payload = get_transient( $this->original_upgrade_payload_key( $payload_key ) );
-		if ( ! is_array( $payload ) || empty( $payload['attachment_id'] ) || empty( $payload['photo'] ) || ! is_array( $payload['photo'] ) ) {
-			delete_transient( $this->original_upgrade_payload_key( $payload_key ) );
-			return;
-		}
-
-		try {
-			$result = $this->upgrade_attachment_to_original(
-				(int) $payload['attachment_id'],
-				$payload['photo']
-			);
-			if ( is_wp_error( $result ) ) {
-				$this->logger->warning(
-					'media_sync',
-					$result->get_error_message(),
-					array(
-						'attachment_id' => (int) $payload['attachment_id'],
-						'photo_id'      => isset( $payload['photo']['id'] ) ? (string) $payload['photo']['id'] : '',
-						'code'          => $result->get_error_code(),
-					),
-					'original_upgrade_failed'
-				);
-			}
-		} finally {
-			delete_transient( $this->original_upgrade_payload_key( $payload_key ) );
-		}
-	}
-
-	/**
-	 * Return whether a source-page sync is currently active or queued.
-	 *
-	 * @param array<string,mixed> $source Source arguments.
-	 * @return bool
-	 */
-	public function is_source_page_sync_active( array $source ) {
-		$normalized = $this->api->normalize_source_args( $source );
-		if ( is_wp_error( $normalized ) ) {
-			return false;
-		}
-
-		$source_key = $this->api->build_source_key( $normalized );
-
-		if ( get_transient( $this->source_sync_lock_key( $source_key ) ) ) {
-			return true;
-		}
-
-		if ( get_transient( $this->lazy_sync_payload_key( $source_key ) ) ) {
-			return true;
-		}
-
-		return (bool) wp_next_scheduled( self::LAZY_SYNC_HOOK, array( $source_key ) );
-	}
-
-	/**
-	 * Return local attachment details for a source-page keyed by Flickr photo ID.
-	 *
-	 * @param array<string,mixed> $source Source arguments.
-	 * @return array<string,array<string,mixed>>
-	 */
-	public function get_synced_attachment_details( array $source ) {
-		$details = array();
-		foreach ( $this->get_synced_attachment_ids( $source ) as $attachment_id ) {
-			$attachment_id = (int) $attachment_id;
-			if ( $attachment_id <= 0 ) {
-				continue;
-			}
-
-			$photo_id = (string) get_post_meta( $attachment_id, '_wpfp_flickr_photo_id', true );
-			if ( '' === $photo_id ) {
-				continue;
-			}
-
-			$display = wp_get_attachment_image_src( $attachment_id, 'large' );
-			$full    = wp_get_attachment_image_src( $attachment_id, 'full' );
-			$srcset  = wp_get_attachment_image_srcset( $attachment_id, 'large' );
-			$sizes   = wp_get_attachment_image_sizes( $attachment_id, 'large' );
-
-			$details[ $photo_id ] = array(
-				'attachment_id' => $attachment_id,
-				'image_url'     => ! empty( $display[0] ) ? (string) $display[0] : '',
-				'full_url'      => ! empty( $full[0] ) ? (string) $full[0] : ( ! empty( $display[0] ) ? (string) $display[0] : '' ),
-				'srcset'        => $srcset ? (string) $srcset : '',
-				'sizes'         => $sizes ? (string) $sizes : '',
-			);
-		}
-
-		return $details;
-	}
-
-	/**
-	 * Return a public lazy-sync status payload for one source page.
-	 *
-	 * @return void
-	 */
-	public function handle_lazy_status_request() {
-		$source = array(
-			'source'         => isset( $_GET['source'] ) ? sanitize_key( wp_unslash( $_GET['source'] ) ) : 'photoset',
-			'user_id'        => isset( $_GET['user_id'] ) ? sanitize_text_field( wp_unslash( $_GET['user_id'] ) ) : '',
-			'photoset_id'    => isset( $_GET['photoset_id'] ) ? sanitize_text_field( wp_unslash( $_GET['photoset_id'] ) ) : '',
-			'per_page'       => isset( $_GET['per_page'] ) ? absint( wp_unslash( $_GET['per_page'] ) ) : 24,
-			'page'           => isset( $_GET['page'] ) ? absint( wp_unslash( $_GET['page'] ) ) : 1,
-			'privacy_filter' => isset( $_GET['privacy_filter'] ) ? absint( wp_unslash( $_GET['privacy_filter'] ) ) : 1,
-		);
-
-		$normalized = $this->api->normalize_source_args( $source );
-		if ( is_wp_error( $normalized ) ) {
-			wp_send_json_error(
-				array(
-					'message' => $normalized->get_error_message(),
-				),
-				400
-			);
-		}
-
-		$expected_count = isset( $_GET['expected_count'] ) ? max( 0, absint( wp_unslash( $_GET['expected_count'] ) ) ) : 0;
-		$items          = $this->get_synced_attachment_details( $normalized );
-		$active         = $this->is_source_page_sync_active( $normalized );
-
-		wp_send_json_success(
-			array(
-				'source_key'       => $this->api->build_source_key( $normalized ),
-				'items'            => $items,
-				'attachment_count' => count( $items ),
-				'expected_count'   => $expected_count,
-				'active'           => $active,
-				'complete'         => $expected_count > 0 ? count( $items ) >= $expected_count : ! $active,
-			)
-		);
-	}
-
-	/**
 	 * Sync a normalized gallery payload into the mapping store.
 	 *
 	 * @param array<string,mixed> $gallery Gallery payload.
@@ -812,7 +544,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 
 		$refresh_existing = ! empty( $options['refresh_existing'] );
 		$prefer_original  = ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'];
-		$upgrade_original = ! empty( $options['upgrade_original'] );
 		$attachment_ids   = array();
 		$created          = 0;
 		$updated          = 0;
@@ -864,10 +595,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 				$updated++;
 			} else {
 				$reused++;
-			}
-
-			if ( $upgrade_original ) {
-				$this->queue_original_upgrade( $attachment_id, $photo );
 			}
 		}
 
@@ -1152,6 +879,24 @@ class WP_Flickr_Portfolio_Media_Sync {
 		$this->ensure_media_import_dependencies();
 
 		$temp_file = download_url( $source_url, 60 );
+
+		// If the primary URL failed and it was the original, fall back to display URL.
+		if ( is_wp_error( $temp_file ) && 'full_url' === ( $import_source['variant'] ?? '' ) && ! empty( $photo['display_url'] ) && (string) $photo['display_url'] !== $source_url ) {
+			$this->logger->warning(
+				'media_sync',
+				'Flickr original download failed, retrying with display URL.',
+				array(
+					'photo_id' => (string) $photo['id'],
+					'code'     => $temp_file->get_error_code(),
+					'error'    => $temp_file->get_error_message(),
+				),
+				'original_download_fallback'
+			);
+			$source_url    = (string) $photo['display_url'];
+			$import_source = array( 'variant' => 'display_url', 'url' => $source_url );
+			$temp_file     = download_url( $source_url, 60 );
+		}
+
 		if ( is_wp_error( $temp_file ) ) {
 			$this->logger->error( 'media_sync', $temp_file->get_error_message(), array( 'photo_id' => (string) $photo['id'], 'code' => $temp_file->get_error_code() ), 'download_failed' );
 			return $temp_file;
@@ -1239,175 +984,11 @@ class WP_Flickr_Portfolio_Media_Sync {
 		}
 	}
 
-	/**
-	 * Queue a post-import upgrade to Flickr's original file for one attachment.
-	 *
-	 * @param int                 $attachment_id Attachment ID.
-	 * @param array<string,mixed> $photo Flickr photo payload.
-	 * @return void
-	 */
-	private function queue_original_upgrade( $attachment_id, array $photo ) {
-		$attachment_id = (int) $attachment_id;
-		if ( $attachment_id <= 0 || empty( $photo['id'] ) || empty( $photo['full_url'] ) ) {
-			return;
-		}
-
-		$current_variant = (string) get_post_meta( $attachment_id, '_wpfp_flickr_import_variant', true );
-		if ( 'full_url' === $current_variant ) {
-			return;
-		}
-
-		if ( empty( $photo['display_url'] ) || (string) $photo['display_url'] === (string) $photo['full_url'] ) {
-			return;
-		}
-
-		$payload_key = md5( $attachment_id . '|' . (string) $photo['id'] );
-		set_transient(
-			$this->original_upgrade_payload_key( $payload_key ),
-			array(
-				'attachment_id' => $attachment_id,
-				'photo'         => $photo,
-			),
-			self::LAZY_SYNC_PAYLOAD_TTL
-		);
-
-		if ( ! wp_next_scheduled( self::ORIGINAL_UPGRADE_HOOK, array( $payload_key ) ) ) {
-			wp_schedule_single_event( time() + 1, self::ORIGINAL_UPGRADE_HOOK, array( $payload_key ) );
-		}
-
-		$this->maybe_spawn_cron();
-		$this->logger->debug(
-			'media_sync',
-			'Queued background upgrade to Flickr original image.',
-			array(
-				'attachment_id' => $attachment_id,
-				'photo_id'      => (string) $photo['id'],
-			),
-			'original_upgrade_queued'
-		);
-	}
-
-	/**
-	 * Replace one attachment file with Flickr's original image.
-	 *
-	 * @param int                 $attachment_id Attachment ID.
-	 * @param array<string,mixed> $photo Flickr photo payload.
-	 * @return true|\WP_Error
-	 */
-	private function upgrade_attachment_to_original( $attachment_id, array $photo ) {
-		$attachment_id = (int) $attachment_id;
-		if ( $attachment_id <= 0 ) {
-			return new WP_Error( 'wpfp_missing_attachment', __( 'Missing attachment to upgrade.', 'wp-flickr-portfolio' ) );
-		}
-
-		if ( empty( $photo['full_url'] ) ) {
-			return new WP_Error( 'wpfp_missing_original_url', __( 'Missing Flickr original image URL.', 'wp-flickr-portfolio' ) );
-		}
-
-		$current_variant = (string) get_post_meta( $attachment_id, '_wpfp_flickr_import_variant', true );
-		if ( 'full_url' === $current_variant ) {
-			return true;
-		}
-
-		$this->ensure_media_import_dependencies();
-		$source_url = (string) $photo['full_url'];
-		$this->logger->info(
-			'media_sync',
-			'Upgrading attachment to Flickr original image.',
-			array(
-				'attachment_id' => $attachment_id,
-				'photo_id'      => isset( $photo['id'] ) ? (string) $photo['id'] : '',
-				'url'           => $source_url,
-			),
-			'original_upgrade_start'
-		);
-
-		$temp_file = download_url( $source_url, 60 );
-		if ( is_wp_error( $temp_file ) ) {
-			return $temp_file;
-		}
-
-		$path      = wp_parse_url( $source_url, PHP_URL_PATH );
-		$basename  = $path ? basename( (string) $path ) : (string) ( $photo['id'] ?? $attachment_id ) . '.jpg';
-		$file_name = sanitize_file_name( (string) ( $photo['id'] ?? $attachment_id ) . '-' . $basename );
-		$file      = array(
-			'name'     => $file_name,
-			'tmp_name' => $temp_file,
-		);
-
-		$moved = wp_handle_sideload(
-			$file,
-			array(
-				'test_form' => false,
-			),
-			current_time( 'mysql' )
-		);
-
-		if ( ! is_array( $moved ) || ! empty( $moved['error'] ) || empty( $moved['file'] ) ) {
-			@unlink( $temp_file );
-			return new WP_Error(
-				'wpfp_original_upgrade_move_failed',
-				! empty( $moved['error'] ) ? (string) $moved['error'] : __( 'Could not move the upgraded original file into the uploads directory.', 'wp-flickr-portfolio' )
-			);
-		}
-
-		$new_file = (string) $moved['file'];
-		$old_file = get_attached_file( $attachment_id );
-
-		update_attached_file( $attachment_id, $new_file );
-		wp_update_post(
-			array(
-				'ID'             => $attachment_id,
-				'post_mime_type' => ! empty( $moved['type'] ) ? (string) $moved['type'] : get_post_mime_type( $attachment_id ),
-				'guid'           => ! empty( $moved['url'] ) ? (string) $moved['url'] : wp_get_attachment_url( $attachment_id ),
-			)
-		);
-
-		$disable_sizes = static function() {
-			return array();
-		};
-		$disable_big_image = static function() {
-			return false;
-		};
-
-		add_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
-		add_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
-
-		try {
-			$metadata = wp_generate_attachment_metadata( $attachment_id, $new_file );
-		} finally {
-			remove_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
-			remove_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
-		}
-
-		if ( is_array( $metadata ) ) {
-			wp_update_attachment_metadata( $attachment_id, $metadata );
-		}
-
-		update_post_meta( $attachment_id, '_wpfp_flickr_import_variant', 'full_url' );
-
-		if ( $old_file && $old_file !== $new_file && file_exists( $old_file ) ) {
-			wp_delete_file( $old_file );
-		}
-
-		$this->logger->info(
-			'media_sync',
-			'Attachment upgraded to Flickr original image.',
-			array(
-				'attachment_id' => $attachment_id,
-				'photo_id'      => isset( $photo['id'] ) ? (string) $photo['id'] : '',
-			),
-			'original_upgrade_complete'
-		);
-
-		return true;
-	}
 
 	/**
 	 * Pick the safest Flickr image URL variant for WordPress import work.
 	 *
-	 * Importing the original file is unnecessarily expensive for this plugin and
-	 * can make lazy/background imports fail on hosts with limited memory.
+	 * Prefers the original Flickr file but falls back to display or thumbnail URL when unavailable.
 	 *
 	 * @param array<string,mixed> $photo Flickr photo payload.
 	 * @return array<string,string>
@@ -1639,26 +1220,6 @@ class WP_Flickr_Portfolio_Media_Sync {
 	 */
 	private function source_sync_lock_key( $source_key ) {
 		return 'wpfp_source_sync_lock_' . md5( (string) $source_key );
-	}
-
-	/**
-	 * Build a transient key for one queued original-upgrade payload.
-	 *
-	 * @param string $payload_key Upgrade payload key.
-	 * @return string
-	 */
-	private function original_upgrade_payload_key( $payload_key ) {
-		return 'wpfp_original_upgrade_' . md5( (string) $payload_key );
-	}
-
-	/**
-	 * Build a transient key for one queued lazy sync payload.
-	 *
-	 * @param string $source_key Source key.
-	 * @return string
-	 */
-	private function lazy_sync_payload_key( $source_key ) {
-		return 'wpfp_lazy_sync_' . md5( (string) $source_key );
 	}
 
 	/**

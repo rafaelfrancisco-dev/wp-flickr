@@ -115,12 +115,5 @@ class WP_Flickr_Portfolio_Plugin {
 			true
 		);
 
-		wp_register_script(
-			'wp-flickr-portfolio-lazy',
-			WPFLICKRPORTFOLIO_URL . 'assets/wp-flickr-portfolio-lazy.js',
-			array(),
-			WPFLICKRPORTFOLIO_VERSION,
-			true
-		);
 	}
 }

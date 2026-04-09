@@ -88,8 +88,7 @@
 							options: [
 								{ label: __( 'Remote Flickr URLs', 'wp-flickr-portfolio' ), value: 'remote' },
 								{ label: __( 'Imported media only', 'wp-flickr-portfolio' ), value: 'media' },
-								{ label: __( 'Imported media fallback to remote', 'wp-flickr-portfolio' ), value: 'auto' },
-								{ label: __( 'Lazy sync attachments on first view', 'wp-flickr-portfolio' ), value: 'lazy' }
+								{ label: __( 'Imported media fallback to remote', 'wp-flickr-portfolio' ), value: 'auto' }
 							],
 							onChange: function( value ) {
 								setAttributes( { mode: value } );

@@ -4,11 +4,11 @@ Tags: flickr, gallery, portfolio, meow gallery, meow lightbox
 Requires at least: 6.0
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 0.8.1
+Stable tag: 0.9.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Fetch Flickr albums and photostream images into WordPress, with remote rendering for Meow Lightbox and optional media sync for Meow Gallery.
+Fetch Flickr albums and photostream images into WordPress, with remote rendering for Meow Lightbox and optional manual or scheduled media sync for Meow Gallery.
 
 == Description ==
 
@@ -20,7 +20,6 @@ Features:
 - Shortcode-driven remote Flickr galleries.
 - Native Gutenberg block for inserting Flickr galleries visually.
 - Manual per-page sync and bulk all-pages import into the WordPress Media Library.
-- Lazy per-page sync triggered from frontend gallery views, with frontend updates that swap remote items to local attachment URLs after the background import starts landing.
 - Optional metadata refresh for already imported Flickr attachments.
 - Optional daily scheduled sync for selected Flickr sources with background run-now support.
 - Dedicated admin log viewer for recent plugin activity.
@@ -72,11 +71,11 @@ Captionless example:
 
 = How does media sync work? =
 
-You can sync one Flickr result page, import all pages for a source, configure a daily scheduled sync for selected sources, or let `mode="lazy"` queue a one-page import after a visitor opens an unsynced gallery page. In lazy mode the page renders remote Flickr items immediately, then the browser swaps those items to local WordPress attachment URLs as the background import finishes. Lazy mode imports the display-sized Flickr file first for speed and can then upgrade the local attachment file to Flickr's original image in the background. Existing imports are matched by Flickr photo ID to avoid duplicates, refresh mode updates metadata on those existing attachments, and local gallery modes are matched against the exact source configuration including `per_page` and `page`.
+You can sync one Flickr result page, import all pages for a source, or configure a daily scheduled sync for selected sources. Existing imports are matched by Flickr photo ID to avoid duplicates, refresh mode updates metadata on those existing attachments, and local gallery modes are matched against the exact source configuration including `per_page` and `page`.
 
 = Is there a Gutenberg block? =
 
-Yes. The plugin registers a `Flickr Portfolio` block so editors can configure galleries from block controls instead of typing shortcode manually. The block can also hide text below images, masonry layout forces that text off automatically, and the `Page` control sets the starting page before visitors use frontend pagination links.
+Yes. The plugin registers a `Flickr Portfolio` block so editors can configure galleries from block controls instead of typing shortcode manually. The block can hide text below images, masonry layout forces that text off automatically, and the `Page` control sets the starting page before visitors use frontend pagination links.
 
 = Is there a debug log viewer? =
 
@@ -84,16 +83,14 @@ Yes. The plugin includes a `Logs` admin subpage that keeps a rolling in-database
 
 == Changelog ==
 
-= 0.8.1 =
+= 0.9.0 =
 
-- Changed lazy sync to import the display-sized Flickr file first so remote items can switch to local attachments quickly.
-- Added background per-photo upgrades from the display-sized import to Flickr's original file after lazy sync has already localized the gallery.
+- Removed `mode="lazy"` and all associated background sync machinery. Use manual per-page sync, bulk all-pages import, or scheduled sync from the admin screen to import Flickr images into the Media Library.
 
-= 0.8.0 =
+= 0.8.2 =
 
-- Changed `mode="lazy"` to render immediately with remote Flickr URLs, queue the import in the background, and progressively replace items with local attachment URLs in the browser as imports complete.
-- Restored preference for Flickr's full/original image file during Media Library imports when that URL is available.
-- Stored synced-page attachment mappings incrementally during import so the lazy frontend can observe progress while the worker is still running.
+- Fixed lazy sync to process one photo per WP-Cron event so large original files do not exhaust the PHP memory or execution-time budget of the background job.
+- Fixed lazy sync re-queuing when a previous sync completed only partially, so all photos are eventually localized and updated in the browser.
 
 = 0.7.2 =
 
