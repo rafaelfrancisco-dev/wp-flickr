@@ -1,0 +1,1781 @@
+<?php
+/**
+ * Media library sync support for Flickr images.
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+class WP_Flickr_Portfolio_Media_Sync {
+
+	/**
+	 * Lazy page sync cron hook.
+	 */
+	const LAZY_SYNC_HOOK = 'wpfp_run_lazy_source_event';
+
+	/**
+	 * Upgrade an imported attachment to Flickr's original file.
+	 */
+	const ORIGINAL_UPGRADE_HOOK = 'wpfp_upgrade_flickr_attachment_original_event';
+
+	/**
+	 * Number of photos to process per incremental lazy sync batch.
+	 *
+	 * The first implementation keeps the whole job in one worker run, but this
+	 * constant remains here so the lazy status poller can reason about progress
+	 * against a stable expected count.
+	 */
+	const LAZY_SYNC_BATCH_SIZE = 24;
+
+	/**
+	 * Manual run-now cron hook.
+	 */
+	const MANUAL_SCHEDULE_HOOK = 'wpfp_run_manual_scheduled_source_event';
+
+	/**
+	 * Scheduled sync cron hook.
+	 */
+	const CRON_HOOK = 'wpfp_run_scheduled_source_event';
+
+	/**
+	 * Lock lifetime for one source-page sync run.
+	 */
+	const SOURCE_SYNC_LOCK_TTL = 15 * MINUTE_IN_SECONDS;
+
+	/**
+	 * Lock lifetime for one scheduled sync run.
+	 */
+	const SCHEDULE_LOCK_TTL = 30 * MINUTE_IN_SECONDS;
+
+	/**
+	 * Lifetime for one queued lazy sync payload.
+	 */
+	const LAZY_SYNC_PAYLOAD_TTL = DAY_IN_SECONDS;
+
+	/**
+	 * Settings manager.
+	 *
+	 * @var WP_Flickr_Portfolio_Settings
+	 */
+	private $settings;
+
+	/**
+	 * Flickr API client.
+	 *
+	 * @var WP_Flickr_Portfolio_API
+	 */
+	private $api;
+
+	/**
+	 * Shared logger.
+	 *
+	 * @var WP_Flickr_Portfolio_Logger
+	 */
+	private $logger;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param WP_Flickr_Portfolio_Settings $settings Settings manager.
+	 * @param WP_Flickr_Portfolio_API      $api API client.
+	 * @param WP_Flickr_Portfolio_Logger   $logger Logger service.
+	 */
+	public function __construct( WP_Flickr_Portfolio_Settings $settings, WP_Flickr_Portfolio_API $api, WP_Flickr_Portfolio_Logger $logger ) {
+		$this->settings = $settings;
+		$this->api      = $api;
+		$this->logger   = $logger;
+
+		add_action( 'admin_post_wpfp_sync_source', array( $this, 'handle_sync_request' ) );
+		add_action( 'admin_post_wpfp_sync_all_pages', array( $this, 'handle_bulk_sync_request' ) );
+		add_action( 'admin_post_wpfp_save_scheduled_source', array( $this, 'handle_save_scheduled_source' ) );
+		add_action( 'admin_post_wpfp_remove_scheduled_source', array( $this, 'handle_remove_scheduled_source' ) );
+		add_action( 'admin_post_wpfp_toggle_scheduled_source', array( $this, 'handle_toggle_scheduled_source' ) );
+		add_action( 'admin_post_wpfp_run_scheduled_source', array( $this, 'handle_run_scheduled_source' ) );
+		add_action( self::LAZY_SYNC_HOOK, array( $this, 'handle_lazy_sync_source' ), 10, 1 );
+		add_action( self::ORIGINAL_UPGRADE_HOOK, array( $this, 'handle_original_upgrade' ), 10, 1 );
+		add_action( self::MANUAL_SCHEDULE_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
+		add_action( self::CRON_HOOK, array( $this, 'handle_cron_scheduled_source' ), 10, 1 );
+		add_action( 'wp_ajax_wpfp_lazy_status', array( $this, 'handle_lazy_status_request' ) );
+		add_action( 'wp_ajax_nopriv_wpfp_lazy_status', array( $this, 'handle_lazy_status_request' ) );
+	}
+
+	/**
+	 * Sync a single source page into the media library.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @param array<string,mixed> $options Sync options.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	public function sync_source( array $source, array $options = array() ) {
+		$this->logger->info(
+			'media_sync',
+			'Starting one-page Flickr sync.',
+			array_merge( $this->source_log_context( $source ), array( 'refresh_existing' => ! empty( $options['refresh_existing'] ) ) ),
+			'sync_source_start'
+		);
+
+		$gallery = $this->api->get_gallery_data( $source, true );
+		if ( is_wp_error( $gallery ) ) {
+			$this->logger->error(
+				'media_sync',
+				$gallery->get_error_message(),
+				array_merge( $this->source_log_context( $source ), array( 'code' => $gallery->get_error_code() ) ),
+				'sync_source_error'
+			);
+			return $gallery;
+		}
+
+		return $this->sync_gallery_payload( $gallery, $options );
+	}
+
+	/**
+	 * Ensure a single source page is synced and return the resolved attachment IDs.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @param array<string,mixed> $options Sync options.
+	 * @return array<int,int>|\WP_Error
+	 */
+	public function ensure_source_page_synced( array $source, array $options = array() ) {
+		$normalized = $this->api->normalize_source_args( $source );
+		if ( is_wp_error( $normalized ) ) {
+			return $normalized;
+		}
+
+		$existing = $this->get_synced_attachment_ids( $normalized );
+		if ( ! empty( $existing ) ) {
+			$this->logger->debug( 'media_sync', 'Requested page already has synced attachments.', array_merge( $this->source_log_context( $normalized ), array( 'attachments' => count( $existing ) ) ), 'ensure_already_synced' );
+			return $existing;
+		}
+
+		$source_key = $this->api->build_source_key( $normalized );
+		$lock_key   = $this->source_sync_lock_key( $source_key );
+		if ( get_transient( $lock_key ) ) {
+			$this->logger->warning( 'media_sync', 'Inline page sync skipped because a sync lock is already active.', $this->source_log_context( $normalized ), 'ensure_locked' );
+			return $this->get_synced_attachment_ids( $normalized );
+		}
+
+		set_transient( $lock_key, time(), self::SOURCE_SYNC_LOCK_TTL );
+
+		try {
+			$result = $this->sync_source( $normalized, $options );
+			if ( is_wp_error( $result ) ) {
+				$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $normalized ), array( 'code' => $result->get_error_code() ) ), 'ensure_sync_error' );
+				return $result;
+			}
+
+			$resolved = $this->get_synced_attachment_ids( $normalized );
+			$this->logger->info( 'media_sync', 'Inline page sync completed.', array_merge( $this->source_log_context( $normalized ), array( 'attachments' => count( $resolved ) ) ), 'ensure_sync_complete' );
+			return $resolved;
+		} finally {
+			delete_transient( $lock_key );
+		}
+	}
+
+	/**
+	 * Queue a one-page lazy sync for the provided source.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @param array<string,mixed> $options Sync options.
+	 * @return bool
+	 */
+	public function queue_lazy_sync( array $source, array $options = array() ) {
+		$normalized = $this->api->normalize_source_args( $source );
+		if ( is_wp_error( $normalized ) ) {
+			$this->logger->error( 'media_sync', $normalized->get_error_message(), array( 'source' => $source ), 'lazy_queue_normalize_error' );
+			return false;
+		}
+
+		$source_key = $this->api->build_source_key( $normalized );
+		if ( get_transient( $this->source_sync_lock_key( $source_key ) ) ) {
+			$this->logger->warning( 'media_sync', 'Skipped lazy queue because the source page is already syncing.', $this->source_log_context( $normalized ), 'lazy_queue_locked' );
+			return false;
+		}
+
+		if ( ! empty( $this->get_synced_attachment_ids( $normalized ) ) ) {
+			$this->logger->debug( 'media_sync', 'Skipped lazy queue because the source page is already synced.', $this->source_log_context( $normalized ), 'lazy_queue_existing' );
+			return false;
+		}
+
+		set_transient(
+			$this->lazy_sync_payload_key( $source_key ),
+			array(
+				'source'  => $normalized,
+				'gallery' => isset( $options['gallery'] ) && is_array( $options['gallery'] ) ? $options['gallery'] : null,
+				'options' => array(
+					'refresh_existing' => ! empty( $options['refresh_existing'] ),
+					'prefer_original'  => ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'],
+					'upgrade_original' => ! empty( $options['upgrade_original'] ),
+				),
+			),
+			self::LAZY_SYNC_PAYLOAD_TTL
+		);
+
+		if ( ! wp_next_scheduled( self::LAZY_SYNC_HOOK, array( $source_key ) ) ) {
+			wp_schedule_single_event( time(), self::LAZY_SYNC_HOOK, array( $source_key ) );
+		}
+
+		$this->maybe_spawn_cron();
+		$this->logger->info( 'media_sync', 'Queued lazy sync for the requested gallery page.', $this->source_log_context( $normalized ), 'lazy_queue_created' );
+
+		return true;
+	}
+
+	/**
+	 * Sync all Flickr pages for a logical source.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @param array<string,mixed> $options Sync options.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	public function sync_all_pages( array $source, array $options = array() ) {
+		$first_page_source         = $source;
+		$first_page_source['page'] = 1;
+
+		$first_gallery = $this->api->get_gallery_data( $first_page_source, true );
+		if ( is_wp_error( $first_gallery ) ) {
+			return $first_gallery;
+		}
+
+		$summary = array(
+			'pages_synced'    => 0,
+			'total_pages'     => isset( $first_gallery['pages'] ) ? max( 1, absint( $first_gallery['pages'] ) ) : 1,
+			'attachments'     => 0,
+			'created'         => 0,
+			'updated'         => 0,
+			'reused'          => 0,
+			'base_source_key' => $this->api->build_collection_key( isset( $first_gallery['source'] ) && is_array( $first_gallery['source'] ) ? $first_gallery['source'] : $first_page_source ),
+		);
+
+		for ( $page = 1; $page <= $summary['total_pages']; $page++ ) {
+			$gallery = 1 === $page ? $first_gallery : $this->api->get_gallery_data(
+				array_merge(
+					isset( $first_gallery['source'] ) && is_array( $first_gallery['source'] ) ? $first_gallery['source'] : $first_page_source,
+					array(
+						'page' => $page,
+					)
+				),
+				true
+			);
+
+			if ( is_wp_error( $gallery ) ) {
+				return $gallery;
+			}
+
+			$page_summary = $this->sync_gallery_payload( $gallery, $options );
+			if ( is_wp_error( $page_summary ) ) {
+				return $page_summary;
+			}
+
+			$summary['pages_synced']++;
+			$summary['attachments'] += absint( $page_summary['attachments'] ?? 0 );
+			$summary['created'] += absint( $page_summary['created'] ?? 0 );
+			$summary['updated'] += absint( $page_summary['updated'] ?? 0 );
+			$summary['reused'] += absint( $page_summary['reused'] ?? 0 );
+		}
+
+		return $summary;
+	}
+
+	/**
+	 * Return synced attachment IDs for a source.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @return array<int,int>
+	 */
+	public function get_synced_attachment_ids( array $source ) {
+		$mapping = get_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, array() );
+		if ( ! is_array( $mapping ) ) {
+			$mapping = array();
+		}
+
+		$source_key = $this->api->build_source_key( $source );
+		$ids        = isset( $mapping[ $source_key ] ) && is_array( $mapping[ $source_key ] ) ? $mapping[ $source_key ] : array();
+		$ids        = $this->filter_existing_attachment_ids( $ids );
+
+		if ( ! empty( $ids ) ) {
+			if ( ! isset( $mapping[ $source_key ] ) || $mapping[ $source_key ] !== $ids ) {
+				$mapping[ $source_key ] = $ids;
+				update_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, $mapping, false );
+				$this->logger->debug( 'media_sync', 'Repaired synced source mapping from existing attachment IDs.', array_merge( $this->source_log_context( $source ), array( 'attachments' => count( $ids ) ) ), 'mapping_repaired' );
+			}
+
+			return $ids;
+		}
+
+		$ids = $this->query_synced_attachment_ids( $source );
+		if ( ! empty( $ids ) ) {
+			$mapping[ $source_key ] = $ids;
+			update_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, $mapping, false );
+			$this->logger->info( 'media_sync', 'Recovered synced attachments from attachment metadata.', array_merge( $this->source_log_context( $source ), array( 'attachments' => count( $ids ) ) ), 'mapping_recovered_from_meta' );
+			return $ids;
+		}
+
+		if ( isset( $mapping[ $source_key ] ) ) {
+			unset( $mapping[ $source_key ] );
+			update_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, $mapping, false );
+		}
+
+		return array();
+	}
+
+	/**
+	 * Render a synced gallery with attachment IDs.
+	 *
+	 * @param array<int,int>      $ids Attachment IDs.
+	 * @param array<string,mixed> $atts Shortcode attributes.
+	 * @param string              $pagination_markup Optional pagination markup.
+	 * @return string
+	 */
+	public function render_synced_gallery( array $ids, array $atts, $pagination_markup = '' ) {
+		if ( empty( $ids ) ) {
+			return '';
+		}
+
+		$layout   = isset( $atts['layout'] ) ? $this->settings->normalize_layout( (string) $atts['layout'] ) : 'grid';
+		$captions = isset( $atts['captions'] ) ? filter_var( $atts['captions'], FILTER_VALIDATE_BOOLEAN ) : true;
+		$captions = 'masonry' === $layout ? false : $captions;
+		$columns  = isset( $atts['columns'] ) ? max( 1, min( 6, absint( $atts['columns'] ) ) ) : 3;
+		$title    = isset( $atts['title'] ) ? trim( (string) $atts['title'] ) : '';
+		$classes  = array(
+			'gallery',
+			'wpfp-gallery',
+			'wpfp-synced-gallery',
+			'wpfp-layout-' . $layout,
+			'wpfp-columns-' . $columns,
+		);
+
+		if ( ! $captions ) {
+			$classes[] = 'wpfp-captions-hidden';
+		}
+
+		if ( ! empty( $atts['class'] ) ) {
+			$extra_classes = preg_split( '/\s+/', (string) $atts['class'] );
+			if ( is_array( $extra_classes ) ) {
+				foreach ( $extra_classes as $extra_class ) {
+					$extra_class = sanitize_html_class( $extra_class );
+					if ( $extra_class ) {
+						$classes[] = $extra_class;
+					}
+				}
+			}
+		}
+
+		wp_enqueue_style( 'wp-flickr-portfolio' );
+
+		ob_start();
+		?>
+		<div class="<?php echo esc_attr( implode( ' ', array_values( array_unique( array_filter( $classes ) ) ) ) ); ?>" data-wpfp-source="media">
+			<?php if ( $title ) : ?>
+				<h3 class="wpfp-gallery-title"><?php echo esc_html( $title ); ?></h3>
+			<?php endif; ?>
+			<div class="wpfp-gallery-grid">
+				<?php foreach ( $ids as $attachment_id ) : ?>
+					<?php
+					$attachment_id = (int) $attachment_id;
+					if ( $attachment_id <= 0 ) {
+						continue;
+					}
+
+					$display = wp_get_attachment_image_src( $attachment_id, 'large' );
+					$full    = wp_get_attachment_image_src( $attachment_id, 'full' );
+					if ( empty( $display[0] ) ) {
+						continue;
+					}
+
+					$image_title  = get_the_title( $attachment_id );
+					$caption      = wp_get_attachment_caption( $attachment_id );
+					$description  = trim( wp_strip_all_tags( (string) get_post_field( 'post_content', $attachment_id ) ) );
+					$caption_text = $caption ? $caption : $description;
+					$alt_text     = trim( (string) get_post_meta( $attachment_id, '_wp_attachment_image_alt', true ) );
+					$full_url     = ! empty( $full[0] ) ? (string) $full[0] : (string) $display[0];
+					?>
+					<figure class="gallery-item wpfp-gallery-item">
+						<div class="gallery-icon landscape">
+							<a href="<?php echo esc_url( $full_url ); ?>" data-attachment-id="<?php echo esc_attr( (string) $attachment_id ); ?>" data-caption="<?php echo esc_attr( $caption_text ? $caption_text : $image_title ); ?>" data-title="<?php echo esc_attr( $image_title ); ?>">
+								<img src="<?php echo esc_url( (string) $display[0] ); ?>" alt="<?php echo esc_attr( $alt_text ? $alt_text : $image_title ); ?>" loading="lazy"<?php echo ! empty( $display[1] ) ? ' width="' . esc_attr( (string) absint( $display[1] ) ) . '"' : ''; ?><?php echo ! empty( $display[2] ) ? ' height="' . esc_attr( (string) absint( $display[2] ) ) . '"' : ''; ?>>
+							</a>
+						</div>
+						<?php if ( $captions && ( $image_title || $caption_text ) ) : ?>
+							<figcaption class="wp-caption-text gallery-caption">
+								<strong><?php echo esc_html( $image_title ); ?></strong>
+								<?php if ( $caption_text ) : ?>
+									<span><?php echo esc_html( $caption_text ); ?></span>
+								<?php endif; ?>
+							</figcaption>
+						<?php endif; ?>
+					</figure>
+				<?php endforeach; ?>
+			</div>
+			<?php echo $pagination_markup; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+		</div>
+		<?php
+
+		return (string) ob_get_clean();
+	}
+
+	/**
+	 * Handle manual admin sync.
+	 *
+	 * @return void
+	 */
+	public function handle_sync_request() {
+		$this->assert_manage_options();
+		check_admin_referer( 'wpfp_sync_source' );
+
+		$request_source = $this->source_from_request( true );
+		$this->logger->info( 'media_sync', 'Manual one-page sync requested from admin.', $this->source_log_context( $request_source ), 'manual_sync_requested' );
+
+		$result = $this->sync_source(
+			$request_source,
+			array(
+				'refresh_existing' => ! empty( $_POST['refresh_existing'] ),
+			)
+		);
+
+		if ( is_wp_error( $result ) ) {
+			$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $request_source ), array( 'code' => $result->get_error_code() ) ), 'manual_sync_failed' );
+			$this->redirect_with_notice( 'sync_error' );
+		}
+
+		$this->logger->info( 'media_sync', 'Manual one-page sync completed.', array_merge( $this->source_log_context( $request_source ), array( 'attachments' => absint( $result['attachments'] ?? 0 ) ) ), 'manual_sync_complete' );
+		$this->redirect_with_notice( 'sync_complete' );
+	}
+
+	/**
+	 * Handle bulk sync of all pages.
+	 *
+	 * @return void
+	 */
+	public function handle_bulk_sync_request() {
+		$this->assert_manage_options();
+		check_admin_referer( 'wpfp_sync_all_pages' );
+
+		$request_source = $this->source_from_request( false );
+		$this->logger->info( 'media_sync', 'Bulk all-pages sync requested from admin.', $this->source_log_context( $request_source ), 'bulk_sync_requested' );
+
+		$result = $this->sync_all_pages(
+			$request_source,
+			array(
+				'refresh_existing' => ! empty( $_POST['refresh_existing'] ),
+			)
+		);
+
+		if ( is_wp_error( $result ) ) {
+			$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $request_source ), array( 'code' => $result->get_error_code() ) ), 'bulk_sync_failed' );
+			$this->redirect_with_notice( 'sync_error' );
+		}
+
+		$this->logger->info( 'media_sync', 'Bulk all-pages sync completed.', array_merge( $this->source_log_context( $request_source ), array( 'pages_synced' => absint( $result['pages_synced'] ?? 0 ), 'total_pages' => absint( $result['total_pages'] ?? 0 ) ) ), 'bulk_sync_complete' );
+		$this->redirect_with_notice( 'bulk_sync_complete' );
+	}
+
+	/**
+	 * Handle saving a scheduled source.
+	 *
+	 * @return void
+	 */
+	public function handle_save_scheduled_source() {
+		$this->assert_manage_options();
+		check_admin_referer( 'wpfp_save_scheduled_source' );
+
+		$source = $this->api->normalize_source_args( $this->source_from_request( false ) );
+		if ( is_wp_error( $source ) ) {
+			$this->redirect_with_notice( 'schedule_error' );
+		}
+
+		$base_key = $this->api->build_collection_key( $source );
+		$records  = $this->get_scheduled_sources();
+		$current  = isset( $records[ $base_key ] ) && is_array( $records[ $base_key ] ) ? $records[ $base_key ] : array();
+
+		$records[ $base_key ] = array_merge(
+			$current,
+			array(
+				'base_key'          => $base_key,
+				'source'            => (string) $source['source'],
+				'user_id'           => (string) $source['user_id'],
+				'photoset_id'       => (string) $source['photoset_id'],
+				'per_page'          => absint( $source['per_page'] ),
+				'privacy_filter'    => absint( $source['privacy_filter'] ),
+				'enabled'           => true,
+				'schedule'          => 'daily',
+				'refresh_existing'  => ! empty( $_POST['refresh_existing'] ),
+				'last_run_at'       => isset( $current['last_run_at'] ) ? absint( $current['last_run_at'] ) : 0,
+				'last_message'      => isset( $current['last_message'] ) ? (string) $current['last_message'] : '',
+				'last_status'       => isset( $current['last_status'] ) ? (string) $current['last_status'] : '',
+				'last_pages_synced' => isset( $current['last_pages_synced'] ) ? absint( $current['last_pages_synced'] ) : 0,
+				'last_total_pages'  => isset( $current['last_total_pages'] ) ? absint( $current['last_total_pages'] ) : 0,
+			)
+		);
+
+		$this->save_scheduled_sources( $records );
+		$this->schedule_source( $base_key, 'daily' );
+		$this->logger->info( 'media_sync', 'Scheduled source saved.', array_merge( $this->source_log_context( $source ), array( 'base_key' => $base_key, 'refresh_existing' => ! empty( $_POST['refresh_existing'] ) ) ), 'schedule_saved' );
+
+		$this->redirect_with_notice( 'schedule_saved' );
+	}
+
+	/**
+	 * Handle removing a scheduled source.
+	 *
+	 * @return void
+	 */
+	public function handle_remove_scheduled_source() {
+		$this->assert_manage_options();
+
+		$base_key = isset( $_GET['base_key'] ) ? sanitize_text_field( wp_unslash( $_GET['base_key'] ) ) : '';
+		check_admin_referer( 'wpfp_remove_scheduled_source_' . $base_key );
+
+		if ( ! $base_key ) {
+			$this->redirect_with_notice( 'schedule_error' );
+		}
+
+		$records = $this->get_scheduled_sources();
+		unset( $records[ $base_key ] );
+		$this->save_scheduled_sources( $records );
+		$this->unschedule_source( $base_key );
+		$this->logger->info( 'media_sync', 'Scheduled source removed.', array( 'base_key' => $base_key ), 'schedule_removed' );
+
+		$this->redirect_with_notice( 'schedule_removed' );
+	}
+
+	/**
+	 * Handle enable/disable for a scheduled source.
+	 *
+	 * @return void
+	 */
+	public function handle_toggle_scheduled_source() {
+		$this->assert_manage_options();
+
+		$base_key = isset( $_GET['base_key'] ) ? sanitize_text_field( wp_unslash( $_GET['base_key'] ) ) : '';
+		$enabled  = isset( $_GET['enabled'] ) ? (bool) absint( wp_unslash( $_GET['enabled'] ) ) : false;
+		check_admin_referer( 'wpfp_toggle_scheduled_source_' . $base_key );
+
+		if ( ! $base_key ) {
+			$this->redirect_with_notice( 'schedule_error' );
+		}
+
+		$records = $this->get_scheduled_sources();
+		if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
+			$this->redirect_with_notice( 'schedule_error' );
+		}
+
+		$records[ $base_key ]['enabled'] = $enabled;
+		$this->save_scheduled_sources( $records );
+		$this->logger->info( 'media_sync', $enabled ? 'Scheduled source enabled.' : 'Scheduled source disabled.', array( 'base_key' => $base_key ), $enabled ? 'schedule_enabled' : 'schedule_disabled' );
+
+		if ( $enabled ) {
+			$this->schedule_source( $base_key, isset( $records[ $base_key ]['schedule'] ) ? (string) $records[ $base_key ]['schedule'] : 'daily' );
+			$this->redirect_with_notice( 'schedule_enabled' );
+		}
+
+		$this->unschedule_source( $base_key );
+		$this->redirect_with_notice( 'schedule_disabled' );
+	}
+
+	/**
+	 * Handle manual run-now action for a scheduled source.
+	 *
+	 * @return void
+	 */
+	public function handle_run_scheduled_source() {
+		$this->assert_manage_options();
+
+		$base_key = isset( $_GET['base_key'] ) ? sanitize_text_field( wp_unslash( $_GET['base_key'] ) ) : '';
+		check_admin_referer( 'wpfp_run_scheduled_source_' . $base_key );
+
+		$result = $this->queue_scheduled_source_run( $base_key );
+		if ( is_wp_error( $result ) ) {
+			$this->logger->warning( 'media_sync', $result->get_error_message(), array( 'base_key' => $base_key, 'code' => $result->get_error_code() ), 'schedule_run_queue_error' );
+			if ( in_array( $result->get_error_code(), array( 'wpfp_schedule_running', 'wpfp_schedule_queued' ), true ) ) {
+				$this->redirect_with_notice( 'schedule_run_queued' );
+			}
+
+			$this->redirect_with_notice( 'schedule_error' );
+		}
+
+		$this->redirect_with_notice( 'schedule_run_queued' );
+	}
+
+	/**
+	 * Handle scheduled cron runs.
+	 *
+	 * @param string $base_key Scheduled source key.
+	 * @return void
+	 */
+	public function handle_cron_scheduled_source( $base_key ) {
+		$this->run_scheduled_source( (string) $base_key );
+	}
+
+	/**
+	 * Handle queued lazy sync runs for a single gallery page.
+	 *
+	 * @param string $source_key Source-page key.
+	 * @return void
+	 */
+	public function handle_lazy_sync_source( $source_key ) {
+		$source_key = (string) $source_key;
+		if ( ! $source_key ) {
+			return;
+		}
+
+		$payload = get_transient( $this->lazy_sync_payload_key( $source_key ) );
+		if ( ! is_array( $payload ) || empty( $payload['source'] ) || ! is_array( $payload['source'] ) ) {
+			delete_transient( $this->lazy_sync_payload_key( $source_key ) );
+			$this->logger->warning( 'media_sync', 'Lazy sync payload was missing or invalid.', array( 'source_key' => $source_key ), 'lazy_payload_missing' );
+			return;
+		}
+
+		$lock_key = $this->source_sync_lock_key( $source_key );
+		if ( get_transient( $lock_key ) ) {
+			$this->logger->warning( 'media_sync', 'Lazy sync skipped because the source page is already locked.', array_merge( $this->source_log_context( $payload['source'] ), array( 'source_key' => $source_key ) ), 'lazy_locked' );
+			return;
+		}
+
+		set_transient( $lock_key, time(), self::SOURCE_SYNC_LOCK_TTL );
+
+		try {
+			$gallery = isset( $payload['gallery'] ) && is_array( $payload['gallery'] ) ? $payload['gallery'] : $this->api->get_gallery_data( $payload['source'], true );
+			if ( is_wp_error( $gallery ) ) {
+				$this->logger->error( 'media_sync', $gallery->get_error_message(), array_merge( $this->source_log_context( $payload['source'] ), array( 'code' => $gallery->get_error_code() ) ), 'lazy_gallery_fetch_failed' );
+				return;
+			}
+
+			$result = $this->sync_gallery_payload(
+				$gallery,
+				isset( $payload['options'] ) && is_array( $payload['options'] ) ? $payload['options'] : array()
+			);
+			if ( is_wp_error( $result ) ) {
+				$this->logger->error( 'media_sync', $result->get_error_message(), array_merge( $this->source_log_context( $payload['source'] ), array( 'code' => $result->get_error_code() ) ), 'lazy_sync_failed' );
+			} else {
+				$this->logger->info( 'media_sync', 'Lazy sync completed in background.', array_merge( $this->source_log_context( $payload['source'] ), array( 'attachments' => absint( $result['attachments'] ?? 0 ) ) ), 'lazy_sync_complete' );
+			}
+		} finally {
+			delete_transient( $lock_key );
+			delete_transient( $this->lazy_sync_payload_key( $source_key ) );
+		}
+	}
+
+	/**
+	 * Upgrade one imported attachment from Flickr's display image to the original file.
+	 *
+	 * @param string $payload_key Upgrade payload key.
+	 * @return void
+	 */
+	public function handle_original_upgrade( $payload_key ) {
+		$payload_key = (string) $payload_key;
+		if ( '' === $payload_key ) {
+			return;
+		}
+
+		$payload = get_transient( $this->original_upgrade_payload_key( $payload_key ) );
+		if ( ! is_array( $payload ) || empty( $payload['attachment_id'] ) || empty( $payload['photo'] ) || ! is_array( $payload['photo'] ) ) {
+			delete_transient( $this->original_upgrade_payload_key( $payload_key ) );
+			return;
+		}
+
+		try {
+			$result = $this->upgrade_attachment_to_original(
+				(int) $payload['attachment_id'],
+				$payload['photo']
+			);
+			if ( is_wp_error( $result ) ) {
+				$this->logger->warning(
+					'media_sync',
+					$result->get_error_message(),
+					array(
+						'attachment_id' => (int) $payload['attachment_id'],
+						'photo_id'      => isset( $payload['photo']['id'] ) ? (string) $payload['photo']['id'] : '',
+						'code'          => $result->get_error_code(),
+					),
+					'original_upgrade_failed'
+				);
+			}
+		} finally {
+			delete_transient( $this->original_upgrade_payload_key( $payload_key ) );
+		}
+	}
+
+	/**
+	 * Return whether a source-page sync is currently active or queued.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @return bool
+	 */
+	public function is_source_page_sync_active( array $source ) {
+		$normalized = $this->api->normalize_source_args( $source );
+		if ( is_wp_error( $normalized ) ) {
+			return false;
+		}
+
+		$source_key = $this->api->build_source_key( $normalized );
+
+		if ( get_transient( $this->source_sync_lock_key( $source_key ) ) ) {
+			return true;
+		}
+
+		if ( get_transient( $this->lazy_sync_payload_key( $source_key ) ) ) {
+			return true;
+		}
+
+		return (bool) wp_next_scheduled( self::LAZY_SYNC_HOOK, array( $source_key ) );
+	}
+
+	/**
+	 * Return local attachment details for a source-page keyed by Flickr photo ID.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @return array<string,array<string,mixed>>
+	 */
+	public function get_synced_attachment_details( array $source ) {
+		$details = array();
+		foreach ( $this->get_synced_attachment_ids( $source ) as $attachment_id ) {
+			$attachment_id = (int) $attachment_id;
+			if ( $attachment_id <= 0 ) {
+				continue;
+			}
+
+			$photo_id = (string) get_post_meta( $attachment_id, '_wpfp_flickr_photo_id', true );
+			if ( '' === $photo_id ) {
+				continue;
+			}
+
+			$display = wp_get_attachment_image_src( $attachment_id, 'large' );
+			$full    = wp_get_attachment_image_src( $attachment_id, 'full' );
+			$srcset  = wp_get_attachment_image_srcset( $attachment_id, 'large' );
+			$sizes   = wp_get_attachment_image_sizes( $attachment_id, 'large' );
+
+			$details[ $photo_id ] = array(
+				'attachment_id' => $attachment_id,
+				'image_url'     => ! empty( $display[0] ) ? (string) $display[0] : '',
+				'full_url'      => ! empty( $full[0] ) ? (string) $full[0] : ( ! empty( $display[0] ) ? (string) $display[0] : '' ),
+				'srcset'        => $srcset ? (string) $srcset : '',
+				'sizes'         => $sizes ? (string) $sizes : '',
+			);
+		}
+
+		return $details;
+	}
+
+	/**
+	 * Return a public lazy-sync status payload for one source page.
+	 *
+	 * @return void
+	 */
+	public function handle_lazy_status_request() {
+		$source = array(
+			'source'         => isset( $_GET['source'] ) ? sanitize_key( wp_unslash( $_GET['source'] ) ) : 'photoset',
+			'user_id'        => isset( $_GET['user_id'] ) ? sanitize_text_field( wp_unslash( $_GET['user_id'] ) ) : '',
+			'photoset_id'    => isset( $_GET['photoset_id'] ) ? sanitize_text_field( wp_unslash( $_GET['photoset_id'] ) ) : '',
+			'per_page'       => isset( $_GET['per_page'] ) ? absint( wp_unslash( $_GET['per_page'] ) ) : 24,
+			'page'           => isset( $_GET['page'] ) ? absint( wp_unslash( $_GET['page'] ) ) : 1,
+			'privacy_filter' => isset( $_GET['privacy_filter'] ) ? absint( wp_unslash( $_GET['privacy_filter'] ) ) : 1,
+		);
+
+		$normalized = $this->api->normalize_source_args( $source );
+		if ( is_wp_error( $normalized ) ) {
+			wp_send_json_error(
+				array(
+					'message' => $normalized->get_error_message(),
+				),
+				400
+			);
+		}
+
+		$expected_count = isset( $_GET['expected_count'] ) ? max( 0, absint( wp_unslash( $_GET['expected_count'] ) ) ) : 0;
+		$items          = $this->get_synced_attachment_details( $normalized );
+		$active         = $this->is_source_page_sync_active( $normalized );
+
+		wp_send_json_success(
+			array(
+				'source_key'       => $this->api->build_source_key( $normalized ),
+				'items'            => $items,
+				'attachment_count' => count( $items ),
+				'expected_count'   => $expected_count,
+				'active'           => $active,
+				'complete'         => $expected_count > 0 ? count( $items ) >= $expected_count : ! $active,
+			)
+		);
+	}
+
+	/**
+	 * Sync a normalized gallery payload into the mapping store.
+	 *
+	 * @param array<string,mixed> $gallery Gallery payload.
+	 * @param array<string,mixed> $options Sync options.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function sync_gallery_payload( array $gallery, array $options = array() ) {
+		if ( empty( $gallery['photos'] ) || ! is_array( $gallery['photos'] ) ) {
+			return new WP_Error( 'wpfp_empty_sync', __( 'No Flickr photos were returned for this source.', 'wp-flickr-portfolio' ) );
+		}
+
+		$refresh_existing = ! empty( $options['refresh_existing'] );
+		$prefer_original  = ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'];
+		$upgrade_original = ! empty( $options['upgrade_original'] );
+		$attachment_ids   = array();
+		$created          = 0;
+		$updated          = 0;
+		$reused           = 0;
+		$page             = isset( $gallery['page'] ) ? absint( $gallery['page'] ) : 1;
+		$collection_key   = $this->api->build_collection_key( isset( $gallery['source'] ) && is_array( $gallery['source'] ) ? $gallery['source'] : array() );
+		$this->logger->info(
+			'media_sync',
+			'Syncing normalized Flickr gallery payload into the Media Library.',
+			array_merge(
+				$this->source_log_context( isset( $gallery['source'] ) && is_array( $gallery['source'] ) ? $gallery['source'] : array() ),
+				array(
+					'photos'           => count( $gallery['photos'] ),
+					'refresh_existing' => $refresh_existing,
+				)
+			),
+			'sync_payload_start'
+		);
+
+		foreach ( $gallery['photos'] as $index => $photo ) {
+			if ( ! is_array( $photo ) ) {
+				continue;
+			}
+
+			$import_result = $this->sync_gallery_photo(
+				isset( $gallery['source'] ) && is_array( $gallery['source'] ) ? $gallery['source'] : array(),
+				$collection_key,
+				isset( $gallery['source_key'] ) ? (string) $gallery['source_key'] : '',
+				$page,
+				$photo,
+				$index,
+				$refresh_existing,
+				$prefer_original
+			);
+			if ( is_wp_error( $import_result ) ) {
+				return $import_result;
+			}
+
+			$attachment_id = isset( $import_result['attachment_id'] ) ? (int) $import_result['attachment_id'] : 0;
+			if ( $attachment_id <= 0 ) {
+				continue;
+			}
+
+			$attachment_ids[] = $attachment_id;
+
+			if ( 'created' === $import_result['status'] ) {
+				$created++;
+			} elseif ( 'updated' === $import_result['status'] ) {
+				$updated++;
+			} else {
+				$reused++;
+			}
+
+			if ( $upgrade_original ) {
+				$this->queue_original_upgrade( $attachment_id, $photo );
+			}
+		}
+
+		$source_key = isset( $gallery['source_key'] ) ? (string) $gallery['source_key'] : $this->api->build_source_key( isset( $gallery['source'] ) && is_array( $gallery['source'] ) ? $gallery['source'] : array() );
+		$mapping    = get_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, array() );
+		if ( ! is_array( $mapping ) ) {
+			$mapping = array();
+		}
+
+		$mapping[ $source_key ] = array_values( array_unique( array_filter( array_map( 'intval', $attachment_ids ) ) ) );
+		update_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, $mapping, false );
+		$this->logger->info(
+			'media_sync',
+			'Gallery payload synced into the Media Library.',
+			array(
+				'source_key'  => $source_key,
+				'collection'  => $collection_key,
+				'page'        => $page,
+				'attachments' => count( $mapping[ $source_key ] ),
+				'created'     => $created,
+				'updated'     => $updated,
+				'reused'      => $reused,
+			),
+			'sync_payload_complete'
+		);
+
+		return array(
+			'attachments'     => count( $mapping[ $source_key ] ),
+			'created'         => $created,
+			'updated'         => $updated,
+			'reused'          => $reused,
+			'source_key'      => $source_key,
+			'base_source_key' => $collection_key,
+			'page'            => $page,
+		);
+	}
+
+	/**
+	 * Import one Flickr photo and store its page/source mapping immediately.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @param string              $collection_key Logical source key without page.
+	 * @param string              $source_key Page-specific source key.
+	 * @param int                 $page Source page number.
+	 * @param array<string,mixed> $photo Flickr photo payload.
+	 * @param int                 $index Zero-based order on the page.
+	 * @param bool                $refresh_existing Whether to refresh existing attachments.
+	 * @param bool                $prefer_original Whether to prefer the original/full Flickr URL.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function sync_gallery_photo( array $source, $collection_key, $source_key, $page, array $photo, $index, $refresh_existing, $prefer_original ) {
+		$this->logger->debug(
+			'media_sync',
+			'Importing Flickr photo into the Media Library.',
+			array(
+				'photo_id'          => isset( $photo['id'] ) ? (string) $photo['id'] : '',
+				'refresh_existing'  => (bool) $refresh_existing,
+				'prefer_original'   => (bool) $prefer_original,
+				'has_full_url'      => ! empty( $photo['full_url'] ),
+				'has_display_url'   => ! empty( $photo['display_url'] ),
+				'has_thumbnail_url' => ! empty( $photo['thumbnail_url'] ),
+			),
+			'import_start'
+		);
+
+		try {
+			$import_result = $this->import_photo(
+				$photo,
+				$refresh_existing,
+				array(
+					'prefer_original' => (bool) $prefer_original,
+				)
+			);
+		} catch ( Throwable $throwable ) {
+			$this->logger->error(
+				'media_sync',
+				$throwable->getMessage(),
+				array(
+					'photo_id' => isset( $photo['id'] ) ? (string) $photo['id'] : '',
+					'file'     => $throwable->getFile(),
+					'line'     => $throwable->getLine(),
+					'type'     => get_class( $throwable ),
+				),
+				'import_throwable'
+			);
+			return new WP_Error(
+				'wpfp_import_throwable',
+				sprintf(
+					/* translators: %s: original PHP error message. */
+					__( 'Media import failed unexpectedly: %s', 'wp-flickr-portfolio' ),
+					$throwable->getMessage()
+				)
+			);
+		}
+
+		if ( is_wp_error( $import_result ) ) {
+			$this->logger->error(
+				'media_sync',
+				$import_result->get_error_message(),
+				array(
+					'photo_id' => isset( $photo['id'] ) ? (string) $photo['id'] : '',
+					'code'     => $import_result->get_error_code(),
+				),
+				'import_error'
+			);
+			return $import_result;
+		}
+
+		$attachment_id = isset( $import_result['attachment_id'] ) ? (int) $import_result['attachment_id'] : 0;
+		if ( $attachment_id > 0 ) {
+			$this->store_synced_attachment_reference( $source, $collection_key, $source_key, $page, $index, $attachment_id );
+		}
+
+		return $import_result;
+	}
+
+	/**
+	 * Persist one attachment as part of a synced Flickr page.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @param string              $collection_key Logical source key without page.
+	 * @param string              $source_key Page-specific source key.
+	 * @param int                 $page Page number.
+	 * @param int                 $index Photo order within the page.
+	 * @param int                 $attachment_id Attachment ID.
+	 * @return void
+	 */
+	private function store_synced_attachment_reference( array $source, $collection_key, $source_key, $page, $index, $attachment_id ) {
+		$attachment_id = (int) $attachment_id;
+		if ( $attachment_id <= 0 ) {
+			return;
+		}
+
+		update_post_meta( $attachment_id, '_wpfp_source_order', (int) $index );
+		update_post_meta( $attachment_id, '_wpfp_source_page', (int) $page );
+		update_post_meta( $attachment_id, '_wpfp_source_collection', (string) $collection_key );
+
+		$mapping = get_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, array() );
+		if ( ! is_array( $mapping ) ) {
+			$mapping = array();
+		}
+
+		$current_mapping = isset( $mapping[ $source_key ] ) && is_array( $mapping[ $source_key ] ) ? $mapping[ $source_key ] : array();
+		$current_mapping[ (int) $index ] = $attachment_id;
+		ksort( $current_mapping, SORT_NUMERIC );
+		$mapping[ $source_key ] = array_values( array_unique( array_filter( array_map( 'intval', $current_mapping ) ) ) );
+		update_option( WP_Flickr_Portfolio_Settings::SYNCED_SOURCES_OPTION, $mapping, false );
+
+		$this->logger->debug(
+			'media_sync',
+			'Stored synced attachment reference for a Flickr page item.',
+			array_merge(
+				$this->source_log_context( $source ),
+				array(
+					'photo_order'   => (int) $index,
+					'attachment_id' => $attachment_id,
+					'attachments'   => count( $mapping[ $source_key ] ),
+				)
+			),
+			'sync_item_stored'
+		);
+	}
+
+	/**
+	 * Filter a list down to existing attachment IDs while preserving order.
+	 *
+	 * @param array<int,mixed> $ids Candidate IDs.
+	 * @return array<int,int>
+	 */
+	private function filter_existing_attachment_ids( array $ids ) {
+		$ids = array_values( array_unique( array_filter( array_map( 'intval', $ids ) ) ) );
+		if ( empty( $ids ) ) {
+			return array();
+		}
+
+		$existing = get_posts(
+			array(
+				'post_type'              => 'attachment',
+				'post_status'            => 'inherit',
+				'posts_per_page'         => count( $ids ),
+				'fields'                 => 'ids',
+				'post__in'               => $ids,
+				'orderby'                => 'post__in',
+				'no_found_rows'          => true,
+				'update_post_meta_cache' => false,
+				'update_post_term_cache' => false,
+			)
+		);
+
+		return array_values( array_map( 'intval', is_array( $existing ) ? $existing : array() ) );
+	}
+
+	/**
+	 * Query synced attachments by stored source metadata.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @return array<int,int>
+	 */
+	private function query_synced_attachment_ids( array $source ) {
+		$page = isset( $source['page'] ) ? max( 1, absint( $source['page'] ) ) : 1;
+
+		$attachments = get_posts(
+			array(
+				'post_type'              => 'attachment',
+				'post_status'            => 'inherit',
+				'posts_per_page'         => -1,
+				'fields'                 => 'ids',
+				'meta_key'               => '_wpfp_source_order',
+				'orderby'                => 'meta_value_num',
+				'order'                  => 'ASC',
+				'meta_query'             => array(
+					'relation' => 'AND',
+					array(
+						'key'   => '_wpfp_source_collection',
+						'value' => $this->api->build_collection_key( $source ),
+					),
+					array(
+						'key'     => '_wpfp_source_page',
+						'value'   => $page,
+						'type'    => 'NUMERIC',
+						'compare' => '=',
+					),
+				),
+				'no_found_rows'          => true,
+				'update_post_meta_cache' => false,
+				'update_post_term_cache' => false,
+			)
+		);
+
+		return array_values( array_map( 'intval', is_array( $attachments ) ? $attachments : array() ) );
+	}
+
+	/**
+	 * Import a Flickr photo into the Media Library.
+	 *
+	 * @param array<string,mixed> $photo Flickr photo payload.
+	 * @param bool                $refresh_existing Whether to refresh an existing attachment's metadata.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function import_photo( array $photo, $refresh_existing, array $options = array() ) {
+		if ( empty( $photo['id'] ) ) {
+			return new WP_Error( 'wpfp_missing_photo_id', __( 'Cannot import a Flickr photo without an ID.', 'wp-flickr-portfolio' ) );
+		}
+
+		$existing = $this->find_attachment_by_flickr_id( (string) $photo['id'] );
+		if ( $existing ) {
+			if ( $refresh_existing ) {
+				$this->update_attachment_meta( $existing, $photo );
+				$this->logger->info( 'media_sync', 'Refreshed existing imported Flickr attachment.', array( 'photo_id' => (string) $photo['id'], 'attachment_id' => $existing ), 'import_updated' );
+				return array(
+					'attachment_id' => $existing,
+					'status'        => 'updated',
+				);
+			}
+
+			$this->logger->debug( 'media_sync', 'Reused existing imported Flickr attachment.', array( 'photo_id' => (string) $photo['id'], 'attachment_id' => $existing ), 'import_reused' );
+			return array(
+				'attachment_id' => $existing,
+				'status'        => 'reused',
+			);
+		}
+
+		$prefer_original = ! isset( $options['prefer_original'] ) || (bool) $options['prefer_original'];
+		$import_source   = $this->select_import_source( $photo, $prefer_original );
+		if ( empty( $import_source['url'] ) ) {
+			return new WP_Error( 'wpfp_missing_photo_url', __( 'Flickr did not provide a downloadable image URL for this photo.', 'wp-flickr-portfolio' ) );
+		}
+
+		$source_url = (string) $import_source['url'];
+
+		$this->logger->info(
+			'media_sync',
+			'Downloading Flickr photo for Media Library import.',
+			array(
+				'photo_id'       => (string) $photo['id'],
+				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
+				'url'            => $source_url,
+			),
+			'import_download_start'
+		);
+
+		$this->ensure_media_import_dependencies();
+
+		$temp_file = download_url( $source_url, 60 );
+		if ( is_wp_error( $temp_file ) ) {
+			$this->logger->error( 'media_sync', $temp_file->get_error_message(), array( 'photo_id' => (string) $photo['id'], 'code' => $temp_file->get_error_code() ), 'download_failed' );
+			return $temp_file;
+		}
+
+		$path      = wp_parse_url( $source_url, PHP_URL_PATH );
+		$basename  = $path ? basename( (string) $path ) : (string) $photo['id'] . '.jpg';
+		$file_name = sanitize_file_name( (string) $photo['id'] . '-' . $basename );
+		$file      = array(
+			'name'     => $file_name,
+			'tmp_name' => $temp_file,
+		);
+
+		$attachment_args = array(
+			'post_title'   => ! empty( $photo['title'] ) ? (string) $photo['title'] : (string) $photo['id'],
+			'post_content' => (string) ( $photo['description'] ?? '' ),
+			'post_excerpt' => (string) ( $photo['description'] ?? '' ),
+		);
+
+		$this->logger->info(
+			'media_sync',
+			'Creating WordPress attachment from downloaded Flickr file.',
+			array(
+				'photo_id'       => (string) $photo['id'],
+				'import_variant' => isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '',
+				'file_name'      => $file_name,
+			),
+			'import_sideload_start'
+		);
+
+		$disable_sizes = static function() {
+			return array();
+		};
+		$disable_big_image = static function() {
+			return false;
+		};
+
+		add_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
+		add_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
+
+		try {
+			$attachment_id = media_handle_sideload(
+				$file,
+				0,
+				(string) ( $photo['description'] ?? '' ),
+				$attachment_args
+			);
+		} finally {
+			remove_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
+			remove_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
+		}
+
+		if ( is_wp_error( $attachment_id ) ) {
+			@unlink( $temp_file );
+			$this->logger->error( 'media_sync', $attachment_id->get_error_message(), array( 'photo_id' => (string) $photo['id'], 'code' => $attachment_id->get_error_code() ), 'sideload_failed' );
+			return $attachment_id;
+		}
+
+		$this->update_attachment_meta( (int) $attachment_id, $photo );
+		update_post_meta( (int) $attachment_id, '_wpfp_flickr_import_variant', isset( $import_source['variant'] ) ? (string) $import_source['variant'] : '' );
+		$this->logger->info( 'media_sync', 'Created new Media Library attachment from Flickr photo.', array( 'photo_id' => (string) $photo['id'], 'attachment_id' => (int) $attachment_id ), 'import_created' );
+
+		return array(
+			'attachment_id' => (int) $attachment_id,
+			'status'        => 'created',
+		);
+	}
+
+	/**
+	 * Load the WordPress media-import dependencies used outside wp-admin.
+	 *
+	 * @return void
+	 */
+	private function ensure_media_import_dependencies() {
+		if ( ! function_exists( 'download_url' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+
+		if ( ! function_exists( 'media_handle_sideload' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/media.php';
+		}
+
+		if ( ! function_exists( 'wp_generate_attachment_metadata' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/image.php';
+		}
+	}
+
+	/**
+	 * Queue a post-import upgrade to Flickr's original file for one attachment.
+	 *
+	 * @param int                 $attachment_id Attachment ID.
+	 * @param array<string,mixed> $photo Flickr photo payload.
+	 * @return void
+	 */
+	private function queue_original_upgrade( $attachment_id, array $photo ) {
+		$attachment_id = (int) $attachment_id;
+		if ( $attachment_id <= 0 || empty( $photo['id'] ) || empty( $photo['full_url'] ) ) {
+			return;
+		}
+
+		$current_variant = (string) get_post_meta( $attachment_id, '_wpfp_flickr_import_variant', true );
+		if ( 'full_url' === $current_variant ) {
+			return;
+		}
+
+		if ( empty( $photo['display_url'] ) || (string) $photo['display_url'] === (string) $photo['full_url'] ) {
+			return;
+		}
+
+		$payload_key = md5( $attachment_id . '|' . (string) $photo['id'] );
+		set_transient(
+			$this->original_upgrade_payload_key( $payload_key ),
+			array(
+				'attachment_id' => $attachment_id,
+				'photo'         => $photo,
+			),
+			self::LAZY_SYNC_PAYLOAD_TTL
+		);
+
+		if ( ! wp_next_scheduled( self::ORIGINAL_UPGRADE_HOOK, array( $payload_key ) ) ) {
+			wp_schedule_single_event( time() + 1, self::ORIGINAL_UPGRADE_HOOK, array( $payload_key ) );
+		}
+
+		$this->maybe_spawn_cron();
+		$this->logger->debug(
+			'media_sync',
+			'Queued background upgrade to Flickr original image.',
+			array(
+				'attachment_id' => $attachment_id,
+				'photo_id'      => (string) $photo['id'],
+			),
+			'original_upgrade_queued'
+		);
+	}
+
+	/**
+	 * Replace one attachment file with Flickr's original image.
+	 *
+	 * @param int                 $attachment_id Attachment ID.
+	 * @param array<string,mixed> $photo Flickr photo payload.
+	 * @return true|\WP_Error
+	 */
+	private function upgrade_attachment_to_original( $attachment_id, array $photo ) {
+		$attachment_id = (int) $attachment_id;
+		if ( $attachment_id <= 0 ) {
+			return new WP_Error( 'wpfp_missing_attachment', __( 'Missing attachment to upgrade.', 'wp-flickr-portfolio' ) );
+		}
+
+		if ( empty( $photo['full_url'] ) ) {
+			return new WP_Error( 'wpfp_missing_original_url', __( 'Missing Flickr original image URL.', 'wp-flickr-portfolio' ) );
+		}
+
+		$current_variant = (string) get_post_meta( $attachment_id, '_wpfp_flickr_import_variant', true );
+		if ( 'full_url' === $current_variant ) {
+			return true;
+		}
+
+		$this->ensure_media_import_dependencies();
+		$source_url = (string) $photo['full_url'];
+		$this->logger->info(
+			'media_sync',
+			'Upgrading attachment to Flickr original image.',
+			array(
+				'attachment_id' => $attachment_id,
+				'photo_id'      => isset( $photo['id'] ) ? (string) $photo['id'] : '',
+				'url'           => $source_url,
+			),
+			'original_upgrade_start'
+		);
+
+		$temp_file = download_url( $source_url, 60 );
+		if ( is_wp_error( $temp_file ) ) {
+			return $temp_file;
+		}
+
+		$path      = wp_parse_url( $source_url, PHP_URL_PATH );
+		$basename  = $path ? basename( (string) $path ) : (string) ( $photo['id'] ?? $attachment_id ) . '.jpg';
+		$file_name = sanitize_file_name( (string) ( $photo['id'] ?? $attachment_id ) . '-' . $basename );
+		$file      = array(
+			'name'     => $file_name,
+			'tmp_name' => $temp_file,
+		);
+
+		$moved = wp_handle_sideload(
+			$file,
+			array(
+				'test_form' => false,
+			),
+			current_time( 'mysql' )
+		);
+
+		if ( ! is_array( $moved ) || ! empty( $moved['error'] ) || empty( $moved['file'] ) ) {
+			@unlink( $temp_file );
+			return new WP_Error(
+				'wpfp_original_upgrade_move_failed',
+				! empty( $moved['error'] ) ? (string) $moved['error'] : __( 'Could not move the upgraded original file into the uploads directory.', 'wp-flickr-portfolio' )
+			);
+		}
+
+		$new_file = (string) $moved['file'];
+		$old_file = get_attached_file( $attachment_id );
+
+		update_attached_file( $attachment_id, $new_file );
+		wp_update_post(
+			array(
+				'ID'             => $attachment_id,
+				'post_mime_type' => ! empty( $moved['type'] ) ? (string) $moved['type'] : get_post_mime_type( $attachment_id ),
+				'guid'           => ! empty( $moved['url'] ) ? (string) $moved['url'] : wp_get_attachment_url( $attachment_id ),
+			)
+		);
+
+		$disable_sizes = static function() {
+			return array();
+		};
+		$disable_big_image = static function() {
+			return false;
+		};
+
+		add_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
+		add_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
+
+		try {
+			$metadata = wp_generate_attachment_metadata( $attachment_id, $new_file );
+		} finally {
+			remove_filter( 'intermediate_image_sizes_advanced', $disable_sizes, 9999 );
+			remove_filter( 'big_image_size_threshold', $disable_big_image, 9999 );
+		}
+
+		if ( is_array( $metadata ) ) {
+			wp_update_attachment_metadata( $attachment_id, $metadata );
+		}
+
+		update_post_meta( $attachment_id, '_wpfp_flickr_import_variant', 'full_url' );
+
+		if ( $old_file && $old_file !== $new_file && file_exists( $old_file ) ) {
+			wp_delete_file( $old_file );
+		}
+
+		$this->logger->info(
+			'media_sync',
+			'Attachment upgraded to Flickr original image.',
+			array(
+				'attachment_id' => $attachment_id,
+				'photo_id'      => isset( $photo['id'] ) ? (string) $photo['id'] : '',
+			),
+			'original_upgrade_complete'
+		);
+
+		return true;
+	}
+
+	/**
+	 * Pick the safest Flickr image URL variant for WordPress import work.
+	 *
+	 * Importing the original file is unnecessarily expensive for this plugin and
+	 * can make lazy/background imports fail on hosts with limited memory.
+	 *
+	 * @param array<string,mixed> $photo Flickr photo payload.
+	 * @return array<string,string>
+	 */
+	private function select_import_source( array $photo, $prefer_original = true ) {
+		$candidates = $prefer_original
+			? array( 'full_url', 'display_url', 'thumbnail_url' )
+			: array( 'display_url', 'full_url', 'thumbnail_url' );
+
+		foreach ( $candidates as $field ) {
+			if ( ! empty( $photo[ $field ] ) ) {
+				return array(
+					'variant' => (string) $field,
+					'url'     => (string) $photo[ $field ],
+				);
+			}
+		}
+
+		return array(
+			'variant' => '',
+			'url'     => '',
+		);
+	}
+
+	/**
+	 * Find an existing attachment for a Flickr photo.
+	 *
+	 * @param string $photo_id Flickr photo ID.
+	 * @return int
+	 */
+	private function find_attachment_by_flickr_id( $photo_id ) {
+		$attachments = get_posts(
+			array(
+				'post_type'              => 'attachment',
+				'post_status'            => 'inherit',
+				'posts_per_page'         => 1,
+				'fields'                 => 'ids',
+				'meta_key'               => '_wpfp_flickr_photo_id',
+				'meta_value'             => $photo_id,
+				'no_found_rows'          => true,
+				'update_post_meta_cache' => false,
+				'update_post_term_cache' => false,
+			)
+		);
+
+		return empty( $attachments ) ? 0 : (int) $attachments[0];
+	}
+
+	/**
+	 * Update attachment metadata.
+	 *
+	 * @param int                 $attachment_id Attachment ID.
+	 * @param array<string,mixed> $photo Photo payload.
+	 * @return void
+	 */
+	private function update_attachment_meta( $attachment_id, array $photo ) {
+		update_post_meta( $attachment_id, '_wpfp_flickr_photo_id', (string) $photo['id'] );
+		update_post_meta( $attachment_id, '_wpfp_flickr_owner', (string) ( $photo['owner'] ?? '' ) );
+		update_post_meta( $attachment_id, '_wpfp_flickr_owner_name', (string) ( $photo['owner_name'] ?? '' ) );
+		update_post_meta( $attachment_id, '_wpfp_flickr_full_url', (string) ( $photo['full_url'] ?? '' ) );
+		update_post_meta( $attachment_id, '_wpfp_flickr_tags', (string) ( $photo['tags'] ?? '' ) );
+		update_post_meta( $attachment_id, '_wpfp_flickr_taken_at', (string) ( $photo['date_taken'] ?? '' ) );
+
+		if ( ! empty( $photo['title'] ) ) {
+			wp_update_post(
+				array(
+					'ID'         => $attachment_id,
+					'post_title' => sanitize_text_field( (string) $photo['title'] ),
+				)
+			);
+		}
+
+		if ( isset( $photo['description'] ) ) {
+			wp_update_post(
+				array(
+					'ID'           => $attachment_id,
+					'post_content' => wp_kses_post( (string) $photo['description'] ),
+					'post_excerpt' => wp_strip_all_tags( (string) $photo['description'] ),
+				)
+			);
+		}
+
+		if ( ! empty( $photo['title'] ) ) {
+			update_post_meta( $attachment_id, '_wp_attachment_image_alt', sanitize_text_field( (string) $photo['title'] ) );
+		}
+	}
+
+	/**
+	 * Parse a source record from a request.
+	 *
+	 * @param bool $include_page Whether to include the posted page value.
+	 * @return array<string,mixed>
+	 */
+	private function source_from_request( $include_page ) {
+		return array(
+			'source'         => isset( $_POST['source'] ) ? sanitize_key( wp_unslash( $_POST['source'] ) ) : 'photoset',
+			'user_id'        => isset( $_POST['user_id'] ) ? sanitize_text_field( wp_unslash( $_POST['user_id'] ) ) : '',
+			'photoset_id'    => isset( $_POST['photoset_id'] ) ? sanitize_text_field( wp_unslash( $_POST['photoset_id'] ) ) : '',
+			'per_page'       => isset( $_POST['per_page'] ) ? absint( wp_unslash( $_POST['per_page'] ) ) : 24,
+			'page'           => $include_page && isset( $_POST['page'] ) ? absint( wp_unslash( $_POST['page'] ) ) : 1,
+			'privacy_filter' => isset( $_POST['privacy_filter'] ) ? absint( wp_unslash( $_POST['privacy_filter'] ) ) : 1,
+		);
+	}
+
+	/**
+	 * Run one scheduled source.
+	 *
+	 * @param string $base_key Source key.
+	 * @return array<string,mixed>|\WP_Error
+	 */
+	private function run_scheduled_source( $base_key ) {
+		if ( ! $base_key ) {
+			return new WP_Error( 'wpfp_missing_schedule_key', __( 'Missing scheduled source key.', 'wp-flickr-portfolio' ) );
+		}
+
+		$lock_key = $this->scheduled_source_lock_key( $base_key );
+		if ( get_transient( $lock_key ) ) {
+			return new WP_Error( 'wpfp_schedule_running', __( 'This scheduled source is already running.', 'wp-flickr-portfolio' ) );
+		}
+
+		set_transient( $lock_key, time(), self::SCHEDULE_LOCK_TTL );
+
+		$records = $this->get_scheduled_sources();
+		try {
+			if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
+				return new WP_Error( 'wpfp_missing_schedule_source', __( 'Scheduled source not found.', 'wp-flickr-portfolio' ) );
+			}
+
+			$records[ $base_key ]['last_status']  = 'running';
+			$records[ $base_key ]['last_message'] = __( 'Running background sync.', 'wp-flickr-portfolio' );
+			$this->save_scheduled_sources( $records );
+			$this->logger->info( 'media_sync', 'Scheduled source background sync started.', array( 'base_key' => $base_key ), 'schedule_running' );
+
+			$record = $records[ $base_key ];
+			$source = array(
+				'source'         => isset( $record['source'] ) ? (string) $record['source'] : 'photoset',
+				'user_id'        => isset( $record['user_id'] ) ? (string) $record['user_id'] : '',
+				'photoset_id'    => isset( $record['photoset_id'] ) ? (string) $record['photoset_id'] : '',
+				'per_page'       => isset( $record['per_page'] ) ? absint( $record['per_page'] ) : 24,
+				'page'           => 1,
+				'privacy_filter' => isset( $record['privacy_filter'] ) ? absint( $record['privacy_filter'] ) : 1,
+			);
+
+			$result = $this->sync_all_pages(
+				$source,
+				array(
+					'refresh_existing' => ! empty( $record['refresh_existing'] ),
+				)
+			);
+
+			if ( is_wp_error( $result ) ) {
+				$records[ $base_key ]['last_run_at'] = time();
+				$records[ $base_key ]['last_status'] = 'error';
+				$records[ $base_key ]['last_message'] = $result->get_error_message();
+				$this->save_scheduled_sources( $records );
+				$this->logger->error( 'media_sync', $result->get_error_message(), array( 'base_key' => $base_key, 'code' => $result->get_error_code() ), 'schedule_failed' );
+				return $result;
+			}
+
+			$records[ $base_key ]['last_run_at'] = time();
+			$records[ $base_key ]['last_status'] = 'success';
+			$records[ $base_key ]['last_pages_synced'] = absint( $result['pages_synced'] ?? 0 );
+			$records[ $base_key ]['last_total_pages'] = absint( $result['total_pages'] ?? 0 );
+			$records[ $base_key ]['last_message'] = sprintf(
+				/* translators: 1: synced pages, 2: total pages. */
+				__( 'Synced %1$d of %2$d pages.', 'wp-flickr-portfolio' ),
+				absint( $result['pages_synced'] ?? 0 ),
+				absint( $result['total_pages'] ?? 0 )
+			);
+			$this->save_scheduled_sources( $records );
+			$this->logger->info( 'media_sync', 'Scheduled source background sync completed.', array( 'base_key' => $base_key, 'pages_synced' => absint( $result['pages_synced'] ?? 0 ), 'total_pages' => absint( $result['total_pages'] ?? 0 ) ), 'schedule_complete' );
+
+			return $result;
+		} finally {
+			delete_transient( $lock_key );
+		}
+	}
+
+	/**
+	 * Queue a background run-now execution for one scheduled source.
+	 *
+	 * @param string $base_key Source key.
+	 * @return bool|\WP_Error
+	 */
+	private function queue_scheduled_source_run( $base_key ) {
+		if ( ! $base_key ) {
+			return new WP_Error( 'wpfp_missing_schedule_key', __( 'Missing scheduled source key.', 'wp-flickr-portfolio' ) );
+		}
+
+		$records = $this->get_scheduled_sources();
+		if ( empty( $records[ $base_key ] ) || ! is_array( $records[ $base_key ] ) ) {
+			return new WP_Error( 'wpfp_missing_schedule_source', __( 'Scheduled source not found.', 'wp-flickr-portfolio' ) );
+		}
+
+		if ( get_transient( $this->scheduled_source_lock_key( $base_key ) ) ) {
+			return new WP_Error( 'wpfp_schedule_running', __( 'This scheduled source is already running.', 'wp-flickr-portfolio' ) );
+		}
+
+		if ( wp_next_scheduled( self::MANUAL_SCHEDULE_HOOK, array( $base_key ) ) ) {
+			return new WP_Error( 'wpfp_schedule_queued', __( 'This scheduled source is already queued to run.', 'wp-flickr-portfolio' ) );
+		}
+
+		$records[ $base_key ]['last_status']  = 'queued';
+		$records[ $base_key ]['last_message'] = __( 'Queued to run in the background.', 'wp-flickr-portfolio' );
+		$this->save_scheduled_sources( $records );
+
+		wp_schedule_single_event( time(), self::MANUAL_SCHEDULE_HOOK, array( $base_key ) );
+		$this->maybe_spawn_cron();
+		$this->logger->info( 'media_sync', 'Queued scheduled source to run in the background.', array( 'base_key' => $base_key ), 'schedule_queued' );
+
+		return true;
+	}
+
+	/**
+	 * Build a transient key used to lock a scheduled source while it runs.
+	 *
+	 * @param string $base_key Source key.
+	 * @return string
+	 */
+	private function scheduled_source_lock_key( $base_key ) {
+		return 'wpfp_schedule_lock_' . md5( (string) $base_key );
+	}
+
+	/**
+	 * Build a transient key used to lock a source-page sync while it runs.
+	 *
+	 * @param string $source_key Source key.
+	 * @return string
+	 */
+	private function source_sync_lock_key( $source_key ) {
+		return 'wpfp_source_sync_lock_' . md5( (string) $source_key );
+	}
+
+	/**
+	 * Build a transient key for one queued original-upgrade payload.
+	 *
+	 * @param string $payload_key Upgrade payload key.
+	 * @return string
+	 */
+	private function original_upgrade_payload_key( $payload_key ) {
+		return 'wpfp_original_upgrade_' . md5( (string) $payload_key );
+	}
+
+	/**
+	 * Build a transient key for one queued lazy sync payload.
+	 *
+	 * @param string $source_key Source key.
+	 * @return string
+	 */
+	private function lazy_sync_payload_key( $source_key ) {
+		return 'wpfp_lazy_sync_' . md5( (string) $source_key );
+	}
+
+	/**
+	 * Trigger WP-Cron as soon as possible for queued background jobs.
+	 *
+	 * @return void
+	 */
+	private function maybe_spawn_cron() {
+		if ( function_exists( 'spawn_cron' ) ) {
+			spawn_cron( time() );
+		}
+	}
+
+	/**
+	 * Build compact source context for logging.
+	 *
+	 * @param array<string,mixed> $source Source arguments.
+	 * @return array<string,mixed>
+	 */
+	private function source_log_context( array $source ) {
+		return array(
+			'source'         => isset( $source['source'] ) ? (string) $source['source'] : '',
+			'user_id'        => isset( $source['user_id'] ) ? (string) $source['user_id'] : '',
+			'photoset_id'    => isset( $source['photoset_id'] ) ? (string) $source['photoset_id'] : '',
+			'page'           => isset( $source['page'] ) ? absint( $source['page'] ) : 1,
+			'per_page'       => isset( $source['per_page'] ) ? absint( $source['per_page'] ) : 0,
+			'privacy_filter' => isset( $source['privacy_filter'] ) ? absint( $source['privacy_filter'] ) : 1,
+			'source_key'     => $this->api->build_source_key( $source ),
+			'collection_key' => $this->api->build_collection_key( $source ),
+		);
+	}
+
+	/**
+	 * Return the scheduled source registry keyed by base source key.
+	 *
+	 * @return array<string,array<string,mixed>>
+	 */
+	private function get_scheduled_sources() {
+		$records = get_option( WP_Flickr_Portfolio_Settings::SCHEDULED_SOURCES_OPTION, array() );
+		if ( ! is_array( $records ) ) {
+			return array();
+		}
+
+		$sanitized = array();
+		foreach ( $records as $base_key => $record ) {
+			if ( is_string( $base_key ) && is_array( $record ) ) {
+				$sanitized[ $base_key ] = $record;
+			}
+		}
+
+		return $sanitized;
+	}
+
+	/**
+	 * Persist scheduled source registry.
+	 *
+	 * @param array<string,array<string,mixed>> $records Scheduled records.
+	 * @return void
+	 */
+	private function save_scheduled_sources( array $records ) {
+		update_option( WP_Flickr_Portfolio_Settings::SCHEDULED_SOURCES_OPTION, $records, false );
+	}
+
+	/**
+	 * Schedule a WP-Cron event for a source.
+	 *
+	 * @param string $base_key Source key.
+	 * @param string $schedule Cron schedule.
+	 * @return void
+	 */
+	private function schedule_source( $base_key, $schedule ) {
+		$this->unschedule_source( $base_key );
+		wp_schedule_event( time() + MINUTE_IN_SECONDS, $schedule ? $schedule : 'daily', self::CRON_HOOK, array( $base_key ) );
+	}
+
+	/**
+	 * Remove scheduled WP-Cron events for a source.
+	 *
+	 * @param string $base_key Source key.
+	 * @return void
+	 */
+	private function unschedule_source( $base_key ) {
+		foreach ( array( self::CRON_HOOK, self::MANUAL_SCHEDULE_HOOK ) as $hook ) {
+			$timestamp = wp_next_scheduled( $hook, array( $base_key ) );
+
+			while ( $timestamp ) {
+				wp_unschedule_event( $timestamp, $hook, array( $base_key ) );
+				$timestamp = wp_next_scheduled( $hook, array( $base_key ) );
+			}
+		}
+	}
+
+	/**
+	 * Ensure the current user can manage plugin settings.
+	 *
+	 * @return void
+	 */
+	private function assert_manage_options() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You are not allowed to do this.', 'wp-flickr-portfolio' ) );
+		}
+	}
+
+	/**
+	 * Redirect back to the admin page with a notice.
+	 *
+	 * @param string $notice Notice key.
+	 * @return void
+	 */
+	private function redirect_with_notice( $notice ) {
+		wp_safe_redirect(
+			$this->settings->admin_page_url(
+				array(
+					'wpfp_notice' => $notice,
+				)
+			)
+		);
+		exit;
+	}
+}

@@ -1,0 +1,208 @@
+.wpfp-gallery {
+  --wpfp-gap: 1rem;
+  --wpfp-border: rgba(17, 24, 39, 0.08);
+  --wpfp-caption: #5b6471;
+  margin: 2rem 0;
+}
+
+.wpfp-gallery-title {
+  margin: 0 0 1rem;
+  font-size: clamp(1.2rem, 2vw, 1.6rem);
+  letter-spacing: -0.02em;
+}
+
+.wpfp-gallery-grid {
+  gap: var(--wpfp-gap);
+}
+
+.wpfp-layout-grid .wpfp-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--wpfp-columns, 3), minmax(0, 1fr));
+}
+
+.wpfp-layout-masonry .wpfp-gallery-grid {
+  column-count: var(--wpfp-columns, 3);
+  column-gap: var(--wpfp-gap);
+}
+
+.wpfp-columns-1 {
+  --wpfp-columns: 1;
+}
+
+.wpfp-columns-2 {
+  --wpfp-columns: 2;
+}
+
+.wpfp-columns-3 {
+  --wpfp-columns: 3;
+}
+
+.wpfp-columns-4 {
+  --wpfp-columns: 4;
+}
+
+.wpfp-columns-5 {
+  --wpfp-columns: 5;
+}
+
+.wpfp-columns-6 {
+  --wpfp-columns: 6;
+}
+
+.wpfp-gallery-item {
+  margin: 0;
+}
+
+.wpfp-layout-masonry .wpfp-gallery-item {
+  display: inline-block;
+  width: 100%;
+  margin: 0 0 var(--wpfp-gap);
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.wpfp-gallery-item .gallery-icon {
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--wpfp-border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(240, 244, 248, 0.96));
+  box-shadow: 0 18px 35px -30px rgba(15, 23, 42, 0.55);
+}
+
+.wpfp-gallery-item a {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.wpfp-gallery-item img {
+  display: block;
+  width: 100%;
+  height: auto;
+  transition: transform 180ms ease, opacity 220ms ease, filter 220ms ease;
+}
+
+.wpfp-layout-grid .wpfp-gallery-item img {
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.wpfp-layout-masonry .wpfp-gallery-item img {
+  aspect-ratio: auto;
+  object-fit: cover;
+}
+
+.wpfp-gallery-item a:hover img,
+.wpfp-gallery-item a:focus img {
+  transform: scale(1.02);
+}
+
+.wpfp-gallery[data-wpfp-mode="lazy"][data-wpfp-lazy-state="pending"] .wpfp-gallery-item img {
+  filter: saturate(0.95);
+}
+
+.wpfp-gallery-item-localized img {
+  filter: saturate(1);
+}
+
+.wpfp-gallery-item .gallery-caption {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.65rem;
+  font-size: 0.92rem;
+  color: var(--wpfp-caption);
+}
+
+.wpfp-gallery-item .gallery-caption strong {
+  color: #111827;
+}
+
+.wpfp-captions-hidden .gallery-caption,
+.wpfp-captions-hidden .blocks-gallery-caption,
+.wpfp-captions-hidden .wp-caption-text {
+  display: none;
+}
+
+.wpfp-error {
+  padding: 0.9rem 1rem;
+  border-left: 4px solid #b91c1c;
+  background: #fff1f2;
+  color: #7f1d1d;
+}
+
+.wpfp-pagination {
+  margin-top: 1.25rem;
+}
+
+.wpfp-pagination-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.wpfp-page-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--wpfp-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 12px 30px -28px rgba(15, 23, 42, 0.7);
+  color: #111827;
+  font-size: 0.95rem;
+  line-height: 1;
+  text-decoration: none;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.wpfp-page-link:hover,
+.wpfp-page-link:focus {
+  border-color: rgba(17, 24, 39, 0.18);
+  background: #f8fafc;
+  color: #0f172a;
+  transform: translateY(-1px);
+}
+
+.wpfp-page-current {
+  border-color: #111827;
+  background: #111827;
+  color: #ffffff;
+}
+
+.wpfp-page-prev,
+.wpfp-page-next {
+  padding-inline: 1rem;
+}
+
+@media (max-width: 900px) {
+  .wpfp-layout-grid .wpfp-gallery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .wpfp-layout-masonry .wpfp-gallery-grid {
+    column-count: 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .wpfp-layout-grid .wpfp-gallery-grid,
+  .wpfp-layout-masonry .wpfp-gallery-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    column-count: auto;
+  }
+
+  .wpfp-pagination-list {
+    gap: 0.4rem;
+  }
+
+  .wpfp-page-link {
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+    padding: 0.5rem 0.75rem;
+  }
+}
