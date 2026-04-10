@@ -145,15 +145,18 @@
 		exifBar.innerHTML = '';
 		flickrLink.style.display = 'none';
 
-		imageEl.alt = title;
+		imageEl.src = '';
+		imageEl.alt = '';
 		loaderEl.style.display = '';
 
 		var tempImg = new Image();
 		tempImg.onload = function () {
+			imageEl.alt = title;
 			imageEl.src = fullUrl;
 			loaderEl.style.display = 'none';
 		};
 		tempImg.onerror = function () {
+			imageEl.alt = title;
 			imageEl.src = fullUrl;
 			loaderEl.style.display = 'none';
 		};
