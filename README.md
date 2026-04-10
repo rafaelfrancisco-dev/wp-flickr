@@ -13,7 +13,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Direct link to the original photo on Flickr from the lightbox.
 - Keyboard navigation (arrow keys for prev/next, Escape to close) in the lightbox.
 - Inspect recent plugin activity from a dedicated admin Logs screen with pagination, filtering, and text-file export.
-- Two layout modes: uniform `grid` and aspect-ratio-preserving `masonry`.
+- Three layout modes: uniform `grid`, aspect-ratio-preserving `masonry`, and edge-to-edge `flush` (no gaps, no rounded corners).
 - Frontend pagination with gallery-specific page links.
 
 ## Installation
@@ -42,7 +42,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 
 `page` sets the initial page to load. Visitors can move between pages from the frontend pagination links, which use gallery-specific query-string parameters.
 
-`captions="false"` hides the text below each image. Masonry layout forces captions off automatically.
+`captions="false"` hides the text below each image. Masonry and flush layouts force captions off automatically.
 
 `layout="tiles"` is kept as a legacy alias and now renders as `masonry`.
 

@@ -66,7 +66,7 @@ class WP_Flickr_Portfolio_Settings {
 			return 'masonry';
 		}
 
-		return in_array( $layout, array( 'grid', 'masonry' ), true ) ? $layout : 'grid';
+		return in_array( $layout, array( 'grid', 'masonry', 'flush' ), true ) ? $layout : 'grid';
 	}
 
 	/**
@@ -306,6 +306,7 @@ class WP_Flickr_Portfolio_Settings {
 								<select id="wpfp_default_layout" name="<?php echo esc_attr( self::OPTION_NAME ); ?>[default_layout]">
 									<option value="grid" <?php selected( $layout_value, 'grid' ); ?>><?php esc_html_e( 'Grid', 'wp-flickr-portfolio' ); ?></option>
 									<option value="masonry" <?php selected( $layout_value, 'masonry' ); ?>><?php esc_html_e( 'Masonry', 'wp-flickr-portfolio' ); ?></option>
+									<option value="flush" <?php selected( $layout_value, 'flush' ); ?>><?php esc_html_e( 'Flush', 'wp-flickr-portfolio' ); ?></option>
 								</select>
 							</td>
 						</tr>

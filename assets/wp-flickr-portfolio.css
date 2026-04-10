@@ -49,6 +49,17 @@
   --wpfp-columns: 6;
 }
 
+.wpfp-layout-flush .wpfp-gallery-grid {
+  gap: 0;
+}
+
+.wpfp-layout-flush .wpfp-gallery-item .gallery-icon {
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+
 .wpfp-gallery-item {
   margin: 0;
 }

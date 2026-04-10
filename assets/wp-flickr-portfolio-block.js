@@ -114,12 +114,13 @@
 							value: normalizedLayout,
 							options: [
 								{ label: __( 'Grid', 'wp-flickr-portfolio' ), value: 'grid' },
-								{ label: __( 'Masonry', 'wp-flickr-portfolio' ), value: 'masonry' }
+								{ label: __( 'Masonry', 'wp-flickr-portfolio' ), value: 'masonry' },
+								{ label: __( 'Flush', 'wp-flickr-portfolio' ), value: 'flush' }
 							],
 							onChange: function( value ) {
 								setAttributes( {
 									layout: value,
-									captions: value === 'masonry' ? false : attributes.captions
+									captions: ( value === 'masonry' || value === 'flush' ) ? false : attributes.captions
 								} );
 							}
 						} ),
@@ -135,9 +136,9 @@
 						createElement( ToggleControl, {
 							label: __( 'Show text below images', 'wp-flickr-portfolio' ),
 							checked: !! attributes.captions,
-							disabled: normalizedLayout === 'masonry',
-							help: normalizedLayout === 'masonry'
-								? __( 'Masonry forces captions off so the image grid can pack tightly.', 'wp-flickr-portfolio' )
+							disabled: normalizedLayout === 'masonry' || normalizedLayout === 'flush',
+							help: ( normalizedLayout === 'masonry' || normalizedLayout === 'flush' )
+								? __( 'Captions are disabled in this layout.', 'wp-flickr-portfolio' )
 								: __( 'Shows the Flickr title and description below each image.', 'wp-flickr-portfolio' ),
 							onChange: function( value ) {
 								setAttributes( { captions: value } );

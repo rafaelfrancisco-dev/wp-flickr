@@ -191,7 +191,7 @@ class WP_Flickr_Portfolio_Shortcode {
 
 		$layout     = $this->settings->normalize_layout( $atts['layout'] );
 		$captions   = filter_var( $atts['captions'], FILTER_VALIDATE_BOOLEAN );
-		$captions   = 'masonry' === $layout ? false : $captions;
+		$captions   = ( 'masonry' === $layout || 'flush' === $layout ) ? false : $captions;
 
 		$this->logger->debug(
 			'shortcode',

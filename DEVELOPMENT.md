@@ -20,8 +20,8 @@ The current implementation supports:
 - Shortcode-based frontend output
 - Gutenberg block-based editor insertion
 - Wide and full-width Gutenberg block alignment support
-- Optional text-below-image captions with masonry forcing captions off
-- Two supported layouts: uniform `grid` and variable-height `masonry`
+- Optional text-below-image captions with masonry and flush layouts forcing captions off
+- Three supported layouts: uniform `grid`, variable-height `masonry`, and edge-to-edge `flush` (no gaps, square corners)
 - Server-rendered frontend pagination with gallery-specific query args
 
 ## Repository Structure
@@ -114,6 +114,7 @@ Related options:
 
 ## Recent Notes
 
+- `0.17.0` added a `flush` layout (zero gap, no rounded corners, no card borders or shadows) and fixed lightbox EXIF camera model display — falls back to `Make` + `Model` EXIF tags when Flickr's synthetic `Camera` tag is absent.
 - `0.16.1` increased the default cache TTL from 15 minutes to 24 hours to conserve the Flickr API rate limit (3 600 requests/hour). Centered gallery pagination. Fixed lightbox background click to close when clicking the area around the image.
 - `0.16.0` added a built-in lightbox with full-size image display, EXIF metadata (camera, lens, aperture, shutter speed, ISO, focal length, location), a Flickr link, and prev/next keyboard navigation. Removed Meow Lightbox support, media library import, scheduled sync, and all associated settings.
 
@@ -235,7 +236,7 @@ Supported shortcode attributes:
 - `per_page`: items per page
 - `page`: result page
 - `privacy_filter`: Flickr privacy filter from `1` to `5`
-- `layout`: `grid` or `masonry`
+- `layout`: `grid`, `masonry`, or `flush`
 - `columns`: remote grid column count
 - `captions`: `true` or `false`
 - `class`: extra CSS classes
@@ -272,7 +273,7 @@ Current block behavior:
 - Reuses the same PHP rendering path as the shortcode, so frontend output stays consistent between shortcode and block usage.
 - Supports Gutenberg `wide` and `full` alignment options.
 - Disables text-below-image captions automatically when the block uses masonry layout.
-- Exposes only `Grid` and `Masonry`; legacy `tiles` blocks preview and render as masonry.
+- Exposes `Grid`, `Masonry`, and `Flush`; legacy `tiles` blocks preview and render as masonry.
 - Treats the `Page` control as the initial page rather than a fixed non-interactive slice.
 
 ## Operational Notes

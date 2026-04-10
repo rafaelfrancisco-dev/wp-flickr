@@ -475,7 +475,8 @@ class WP_Flickr_Portfolio_API {
 		$location   = $this->fetch_photo_location( $photo_id );
 
 		$result = array(
-			'camera'    => $this->find_exif_tag( $exif_tags, 'Camera' ),
+			'camera'    => $this->find_exif_tag( $exif_tags, 'Camera' )
+				?: rtrim( trim( $this->find_exif_tag( $exif_tags, 'Make' ) . ' ' . $this->find_exif_tag( $exif_tags, 'Model' ) ) ),
 			'lens'      => $this->find_exif_tag( $exif_tags, 'LensModel' ),
 			'aperture'  => $this->find_exif_tag( $exif_tags, 'FNumber' ) ?: $this->find_exif_tag( $exif_tags, 'Aperture' ),
 			'shutter'   => $this->find_exif_tag( $exif_tags, 'ExposureTime' ),
