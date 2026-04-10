@@ -32,6 +32,13 @@ class WP_Flickr_Portfolio_Settings {
 	private $logger;
 
 	/**
+	 * Importer service (set after construction to avoid a circular dependency).
+	 *
+	 * @var WP_Flickr_Portfolio_Importer|null
+	 */
+	private $importer = null;
+
+	/**
 	 * Default option values.
 	 *
 	 * @return array<string,mixed>
@@ -79,6 +86,16 @@ class WP_Flickr_Portfolio_Settings {
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_wpfp_clear_logs', array( $this, 'handle_clear_logs' ) );
 		add_action( 'admin_post_wpfp_export_logs', array( $this, 'handle_export_logs' ) );
+	}
+
+	/**
+	 * Wire the importer service after construction.
+	 *
+	 * @param WP_Flickr_Portfolio_Importer $importer Importer service.
+	 * @return void
+	 */
+	public function set_importer( WP_Flickr_Portfolio_Importer $importer ) {
+		$this->importer = $importer;
 	}
 
 	/**
@@ -212,6 +229,17 @@ class WP_Flickr_Portfolio_Settings {
 			'wp-flickr-portfolio-logs',
 			array( $this, 'render_logs_page' )
 		);
+
+		if ( null !== $this->importer ) {
+			add_submenu_page(
+				'wp-flickr-portfolio',
+				__( 'Import from Flickr', 'wp-flickr-portfolio' ),
+				__( 'Import', 'wp-flickr-portfolio' ),
+				'manage_options',
+				'wp-flickr-portfolio-import',
+				array( $this->importer, 'render_admin_page' )
+			);
+		}
 	}
 
 	/**

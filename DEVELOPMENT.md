@@ -23,6 +23,7 @@ The current implementation supports:
 - Optional text-below-image captions with masonry and flush layouts forcing captions off
 - Three supported layouts: uniform `grid`, variable-height `masonry`, and edge-to-edge `flush` (no gaps, square corners)
 - Server-rendered frontend pagination with gallery-specific query args
+- Background import of Flickr photos into the WordPress media library with live progress tracking
 
 ## Repository Structure
 
@@ -41,9 +42,10 @@ The current implementation supports:
 `includes/class-wp-flickr-portfolio-settings.php`
 
 - Owns plugin settings.
-- Registers the top-level admin screen.
+- Registers the top-level admin screen and submenus (Logs, Import).
 - Renders admin UI for credentials, OAuth actions, cache clearing, and log viewing.
 - Logs subpage supports paginated browsing (25 entries per page) and exporting filtered logs as a downloadable text file.
+- Accepts an importer reference via `set_importer()` to register the Import submenu without a circular dependency.
 
 `includes/class-wp-flickr-portfolio-logger.php`
 
@@ -65,6 +67,18 @@ The current implementation supports:
 - Caches gallery payloads.
 - Maps Flickr API responses into a normalized internal gallery payload.
 - Provides an AJAX endpoint for fetching photo EXIF data (`flickr.photos.getExif` and `flickr.photos.geo.getLocation`).
+- `get_photos_page(array $args)`: fetches a single page of photos without reading or writing the transient cache — used by the importer.
+- `get_photosets(string $user_id)`: fetches the user's photoset list via `flickr.photosets.getList` for the Import admin UI dropdown.
+
+`includes/class-wp-flickr-portfolio-importer.php`
+
+- Owns the background import job lifecycle.
+- Provides AJAX handlers for starting, stopping, and polling import progress.
+- Runs a WP-Cron single-event worker (`wpfp_run_import_worker`) that processes photos in batches of 3.
+- Uses `media_handle_sideload()` to add photos to the media library.
+- Stores `_wpfp_flickr_photo_id` post-meta on each attachment for deduplication.
+- Persists job state (status, counts, current page/index) in the `wpfp_import_job` option.
+- Renders the Import admin subpage with a live progress bar and inline JS polling.
 
 `includes/class-wp-flickr-portfolio-shortcode.php`
 
@@ -111,9 +125,16 @@ Related options:
 - `wpfp_request_token`: temporary Flickr request token data during OAuth
 - `wpfp_cache_keys`: known transient keys for cache invalidation
 - `wpfp_logs`: rolling plugin-owned operational log entries
+- `wpfp_import_job`: current or last import job state (status, progress counters, source config)
+
+Transients:
+
+- `wpfp_import_lock`: short-lived mutex preventing concurrent import worker runs (TTL 120 s)
 
 ## Recent Notes
 
+- `0.18.0` adds a one-shot background import feature (`WP Flickr Portfolio → Import`). Photos are downloaded from the connected Flickr account into the WordPress media library using WP-Cron single events with a batch size of 3. A live progress bar on the admin page polls the job state via AJAX every 2 seconds. Already-imported photos are skipped based on the `_wpfp_flickr_photo_id` attachment meta key. The import can be stopped at any time. New API methods `get_photos_page()` and `get_photosets()` support pagination without cache interference and photoset list fetching.
+- `0.17.1` fixed flush layout columns and lightbox title/spinner overlap.
 - `0.17.0` added a `flush` layout (zero gap, no rounded corners, no card borders or shadows) and fixed lightbox EXIF camera model display — falls back to `Make` + `Model` EXIF tags when Flickr's synthetic `Camera` tag is absent.
 - `0.16.1` increased the default cache TTL from 15 minutes to 24 hours to conserve the Flickr API rate limit (3 600 requests/hour). Centered gallery pagination. Fixed lightbox background click to close when clicking the area around the image.
 - `0.16.0` added a built-in lightbox with full-size image display, EXIF metadata (camera, lens, aperture, shutter speed, ISO, focal length, location), a Flickr link, and prev/next keyboard navigation. Removed Meow Lightbox support, media library import, scheduled sync, and all associated settings.

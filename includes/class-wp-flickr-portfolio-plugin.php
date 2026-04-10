@@ -45,6 +45,13 @@ class WP_Flickr_Portfolio_Plugin {
 	private $shortcode;
 
 	/**
+	 * Background importer.
+	 *
+	 * @var WP_Flickr_Portfolio_Importer
+	 */
+	private $importer;
+
+	/**
 	 * Return singleton instance.
 	 *
 	 * @return WP_Flickr_Portfolio_Plugin
@@ -65,6 +72,8 @@ class WP_Flickr_Portfolio_Plugin {
 		$this->settings  = new WP_Flickr_Portfolio_Settings( $this->logger );
 		$this->api       = new WP_Flickr_Portfolio_API( $this->settings, $this->logger );
 		$this->shortcode = new WP_Flickr_Portfolio_Shortcode( $this->settings, $this->api, $this->logger );
+		$this->importer  = new WP_Flickr_Portfolio_Importer( $this->settings, $this->api, $this->logger );
+		$this->settings->set_importer( $this->importer );
 
 		add_action( 'plugins_loaded', array( $this, 'load_textdomain' ) );
 		add_action( 'init', array( $this, 'register_assets' ) );

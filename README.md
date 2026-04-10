@@ -15,6 +15,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Inspect recent plugin activity from a dedicated admin Logs screen with pagination, filtering, and text-file export.
 - Three layout modes: uniform `grid`, aspect-ratio-preserving `masonry`, and edge-to-edge `flush` (no gaps, no rounded corners).
 - Frontend pagination with gallery-specific page links.
+- One-click background import from Flickr into the WordPress media library, with a live progress bar and automatic deduplication.
 
 ## Installation
 
@@ -25,6 +26,7 @@ Development and architecture notes live in [DEVELOPMENT.md](./DEVELOPMENT.md).
 5. Configure your Flickr app's OAuth callback URL with the value shown on the plugin settings page.
 6. Click `Connect Flickr` if you need private content access.
 7. Open the `Logs` subpage when you need to inspect plugin activity or debug issues.
+8. Use the `Import` subpage to download your Flickr photos into the WordPress media library.
 
 ## Shortcode
 
@@ -62,6 +64,20 @@ Clicking a gallery image opens the built-in lightbox:
 - The `Logs` admin screen keeps a rolling in-database history of recent plugin events so debugging does not depend on server log access.
 - EXIF data is cached per photo in both browser memory and WordPress transients.
 - Gallery payloads and EXIF data are cached for 24 hours by default (minimum 1 hour) to conserve the Flickr API rate limit of 3 600 requests per hour.
+
+## Import from Flickr
+
+The **Import** admin subpage (`WP Flickr Portfolio → Import`) downloads photos from your connected Flickr account directly into the WordPress media library.
+
+- Select a source: your full photostream or a specific photoset.
+- Choose a privacy level (Public through Private; Private requires an OAuth connection).
+- Click **Start Import**. The import runs in the background — you can leave the page and come back.
+- A live progress bar updates every two seconds while the import is running.
+- Already-imported photos are automatically skipped based on their Flickr photo ID, so it is safe to run the import more than once.
+- Click **Stop Import** at any time to cancel the current run.
+- Import activity is visible on the Logs subpage under the `importer` component.
+
+Rate limiting: the importer respects the existing Flickr API pacing (3-second gap between REST calls) and processes photos in small batches so it never floods the API.
 
 ## Gutenberg Block
 

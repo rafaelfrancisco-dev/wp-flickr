@@ -152,6 +152,87 @@ class WP_Flickr_Portfolio_API {
 	}
 
 	/**
+	 * Fetch a single page of photos without reading or writing the transient cache.
+	 *
+	 * Intended for use by the background importer which pages through all results
+	 * and must not pollute the display cache with import-specific arguments.
+	 *
+	 * @param array<string,mixed> $args Source arguments (source, user_id, photoset_id, per_page, page, privacy_filter).
+	 * @return array<string,mixed>|\WP_Error Payload with 'photos', 'total', 'pages', 'page', 'per_page'.
+	 */
+	public function get_photos_page( array $args ) {
+		$normalized = $this->normalize_source_args( $args );
+
+		if ( is_wp_error( $normalized ) ) {
+			return $normalized;
+		}
+
+		return $this->fetch_gallery_data( $normalized );
+	}
+
+	/**
+	 * Fetch the list of photosets for a Flickr user.
+	 *
+	 * Requires the plugin to be connected via OAuth. Falls back to the
+	 * authenticated user's NSID when $user_id is empty.
+	 *
+	 * @param string $user_id Flickr NSID. Leave empty to use the connected account.
+	 * @return array<int,array<string,mixed>>|\WP_Error Each item: {id, title, photos}.
+	 */
+	public function get_photosets( $user_id = '' ) {
+		$user = sanitize_text_field( (string) $user_id );
+		if ( empty( $user ) ) {
+			$user = (string) $this->settings->get( 'user_nsid' );
+		}
+
+		if ( empty( $user ) ) {
+			return new WP_Error( 'wpfp_missing_user', __( 'A Flickr user_id is required to list photosets.', 'wp-flickr-portfolio' ) );
+		}
+
+		$params = array(
+			'method'         => 'flickr.photosets.getList',
+			'format'         => 'json',
+			'nojsoncallback' => '1',
+			'user_id'        => $user,
+			'per_page'       => '500',
+		);
+
+		$response = $this->request( $params, $this->settings->is_connected() );
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$raw_sets = isset( $response['photosets']['photoset'] ) && is_array( $response['photosets']['photoset'] )
+			? $response['photosets']['photoset']
+			: array();
+
+		$sets = array();
+		foreach ( $raw_sets as $set ) {
+			if ( ! is_array( $set ) ) {
+				continue;
+			}
+
+			$title = '';
+			if ( isset( $set['title'] ) ) {
+				$title = is_array( $set['title'] ) ? (string) ( $set['title']['_content'] ?? '' ) : (string) $set['title'];
+			}
+
+			$sets[] = array(
+				'id'     => isset( $set['id'] ) ? (string) $set['id'] : '',
+				'title'  => $title,
+				'photos' => isset( $set['photos'] ) ? (int) $set['photos'] : 0,
+			);
+		}
+
+		usort( $sets, static function ( $a, $b ) {
+			return strcmp( $a['title'], $b['title'] );
+		} );
+
+		return $sets;
+	}
+
+	/**
 	 * Normalize source attributes.
 	 *
 	 * @param array<string,mixed> $args Source arguments.
