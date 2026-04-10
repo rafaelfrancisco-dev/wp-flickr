@@ -25,9 +25,14 @@ class WP_Flickr_Portfolio_Importer {
 	const LOCK_TTL = 120;
 
 	/**
-	 * WP-Cron hook name for the background worker.
+	 * WP-Cron hook name (fallback only — primary dispatch is via HTTP self-request).
 	 */
 	const WORKER_HOOK = 'wpfp_run_import_worker';
+
+	/**
+	 * AJAX action name used for the non-blocking self-request tick.
+	 */
+	const TICK_ACTION = 'wpfp_worker_tick';
 
 	/**
 	 * Number of photos processed per worker invocation.
@@ -84,6 +89,7 @@ class WP_Flickr_Portfolio_Importer {
 		add_action( 'wp_ajax_wpfp_start_import',        array( $this, 'handle_start_import' ) );
 		add_action( 'wp_ajax_wpfp_stop_import',         array( $this, 'handle_stop_import' ) );
 		add_action( 'wp_ajax_wpfp_get_import_progress', array( $this, 'handle_get_import_progress' ) );
+		add_action( 'wp_ajax_' . self::TICK_ACTION,     array( $this, 'handle_worker_tick' ) );
 		add_action( self::WORKER_HOOK,                  array( $this, 'run_worker' ) );
 	}
 
@@ -143,8 +149,6 @@ class WP_Flickr_Portfolio_Importer {
 
 		update_option( self::JOB_OPTION, $job, false );
 
-		wp_schedule_single_event( time(), self::WORKER_HOOK );
-
 		$this->logger->info(
 			'importer',
 			'Import job started.',
@@ -155,6 +159,9 @@ class WP_Flickr_Portfolio_Importer {
 			),
 			'import_start'
 		);
+
+		// Dispatch: non-blocking self-request (immediate) + WP-Cron (fallback).
+		$this->spawn_worker();
 
 		wp_send_json_success( array( 'job' => $this->job_for_response( $job ) ) );
 	}
@@ -196,175 +203,40 @@ class WP_Flickr_Portfolio_Importer {
 		wp_send_json_success( array( 'job' => $this->job_for_response( $this->get_job() ) ) );
 	}
 
+	/**
+	 * AJAX: worker tick triggered by the non-blocking self-request.
+	 *
+	 * Runs in the background (non-blocking from the caller's perspective).
+	 * Processes one batch and reschedules via spawn_worker() if needed.
+	 *
+	 * @return void
+	 */
+	public function handle_worker_tick() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( '', '', array( 'response' => 403 ) );
+		}
+
+		check_ajax_referer( 'wpfp_worker_tick', 'nonce' );
+
+		// Prevent the response from waiting for this to finish.
+		$this->close_http_connection();
+
+		$this->process_batch();
+
+		wp_die();
+	}
+
 	// -------------------------------------------------------------------------
-	// Background worker
+	// WP-Cron fallback worker
 	// -------------------------------------------------------------------------
 
 	/**
-	 * WP-Cron callback: process one batch of photos.
+	 * WP-Cron hook callback (fallback in case the HTTP self-request fails).
 	 *
 	 * @return void
 	 */
 	public function run_worker() {
-		// Acquire mutex.
-		if ( get_transient( self::LOCK_KEY ) ) {
-			return;
-		}
-		set_transient( self::LOCK_KEY, 1, self::LOCK_TTL );
-
-		try {
-			$job = $this->get_job();
-
-			if ( 'running' !== ( $job['status'] ?? '' ) ) {
-				delete_transient( self::LOCK_KEY );
-				return;
-			}
-
-			// Fetch the current Flickr page.
-			$page_data = $this->api->get_photos_page(
-				array(
-					'source'         => $job['source'],
-					'user_id'        => $job['user_id'],
-					'photoset_id'    => $job['photoset_id'],
-					'per_page'       => self::PHOTOS_PER_PAGE,
-					'page'           => $job['current_page'],
-					'privacy_filter' => $job['privacy_filter'],
-				)
-			);
-
-			if ( is_wp_error( $page_data ) ) {
-				$job['status']     = 'failed';
-				$job['last_error'] = $page_data->get_error_message();
-				update_option( self::JOB_OPTION, $job, false );
-				$this->logger->error(
-					'importer',
-					'Import worker failed to fetch Flickr page.',
-					array(
-						'page'  => $job['current_page'],
-						'error' => $page_data->get_error_message(),
-					),
-					'worker_fetch_error'
-				);
-				delete_transient( self::LOCK_KEY );
-				return;
-			}
-
-			$page_photos = isset( $page_data['photos'] ) && is_array( $page_data['photos'] )
-				? $page_data['photos']
-				: array();
-
-			// Populate totals from first page response.
-			if ( 0 === $job['total_pages'] && isset( $page_data['pages'] ) ) {
-				$job['total_pages'] = (int) $page_data['pages'];
-			}
-			if ( 0 === $job['total_photos'] && isset( $page_data['total'] ) ) {
-				$job['total_photos'] = (int) $page_data['total'];
-			}
-
-			// Handle empty page (e.g. user has no photos, or source is empty).
-			if ( empty( $page_photos ) ) {
-				$job['status']       = 'completed';
-				$job['completed_at'] = time();
-				update_option( self::JOB_OPTION, $job, false );
-				$this->logger->info( 'importer', 'Import completed (no photos on page).', array(), 'import_complete' );
-				delete_transient( self::LOCK_KEY );
-				return;
-			}
-
-			// Process up to BATCH_SIZE photos starting at current_index.
-			$batch_count = 0;
-			while ( $batch_count < self::BATCH_SIZE ) {
-				$idx   = $job['current_index'];
-				$photo = isset( $page_photos[ $idx ] ) ? $page_photos[ $idx ] : null;
-
-				if ( null === $photo ) {
-					// Exhausted this page — advance to the next.
-					$job['current_page']++;
-					$job['current_index'] = 0;
-					break;
-				}
-
-				$photo_id = isset( $photo['id'] ) ? (string) $photo['id'] : '';
-
-				if ( $this->photo_exists( $photo_id ) ) {
-					$job['skipped']++;
-					$this->logger->debug(
-						'importer',
-						'Photo already in media library, skipping.',
-						array( 'photo_id' => $photo_id ),
-						'photo_skip'
-					);
-				} else {
-					$result = $this->import_photo( $photo );
-					if ( is_wp_error( $result ) ) {
-						$job['failed_items']++;
-						$this->logger->warning(
-							'importer',
-							'Failed to import photo.',
-							array(
-								'photo_id' => $photo_id,
-								'error'    => $result->get_error_message(),
-							),
-							'photo_import_error'
-						);
-					} else {
-						$job['imported']++;
-						$this->logger->debug(
-							'importer',
-							'Photo imported.',
-							array(
-								'photo_id'      => $photo_id,
-								'attachment_id' => $result,
-							),
-							'photo_imported'
-						);
-					}
-				}
-
-				$job['processed']++;
-				$job['current_index']++;
-				$batch_count++;
-			}
-
-			// Check if we've moved past the last page.
-			$all_done = $job['total_pages'] > 0 && $job['current_page'] > $job['total_pages'];
-
-			// Also done if we exhausted all photos on the final page.
-			if ( ! $all_done && 0 === $job['current_index'] && $job['current_page'] > $job['total_pages'] && $job['total_pages'] > 0 ) {
-				$all_done = true;
-			}
-
-			if ( $all_done ) {
-				$job['status']       = 'completed';
-				$job['completed_at'] = time();
-				update_option( self::JOB_OPTION, $job, false );
-				$this->logger->info(
-					'importer',
-					'Import job completed.',
-					array(
-						'imported'     => $job['imported'],
-						'skipped'      => $job['skipped'],
-						'failed_items' => $job['failed_items'],
-					),
-					'import_complete'
-				);
-				delete_transient( self::LOCK_KEY );
-				return;
-			}
-
-			// More work remains — persist progress and schedule the next batch.
-			update_option( self::JOB_OPTION, $job, false );
-			delete_transient( self::LOCK_KEY );
-			wp_schedule_single_event( time(), self::WORKER_HOOK );
-
-		} catch ( \Exception $e ) {
-			$job            = $this->get_job();
-			$job['status']  = 'failed';
-			$job['last_error'] = $e->getMessage();
-			update_option( self::JOB_OPTION, $job, false );
-			$this->logger->error( 'importer', 'Unexpected exception in import worker.', array( 'error' => $e->getMessage() ), 'worker_exception' );
-			delete_transient( self::LOCK_KEY );
-		}
+		$this->process_batch();
 	}
 
 	// -------------------------------------------------------------------------
@@ -666,6 +538,234 @@ class WP_Flickr_Portfolio_Importer {
 	}
 
 	// -------------------------------------------------------------------------
+	// Core batch processing (shared by HTTP tick and WP-Cron fallback)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Process one batch of photos and reschedule if more remain.
+	 *
+	 * @return void
+	 */
+	private function process_batch() {
+		// Acquire mutex.
+		if ( get_transient( self::LOCK_KEY ) ) {
+			return;
+		}
+		set_transient( self::LOCK_KEY, 1, self::LOCK_TTL );
+
+		try {
+			$job = $this->get_job();
+
+			if ( 'running' !== ( $job['status'] ?? '' ) ) {
+				delete_transient( self::LOCK_KEY );
+				return;
+			}
+
+			// Fetch the current Flickr page.
+			$page_data = $this->api->get_photos_page(
+				array(
+					'source'         => $job['source'],
+					'user_id'        => $job['user_id'],
+					'photoset_id'    => $job['photoset_id'],
+					'per_page'       => self::PHOTOS_PER_PAGE,
+					'page'           => $job['current_page'],
+					'privacy_filter' => $job['privacy_filter'],
+				)
+			);
+
+			if ( is_wp_error( $page_data ) ) {
+				$job['status']     = 'failed';
+				$job['last_error'] = $page_data->get_error_message();
+				update_option( self::JOB_OPTION, $job, false );
+				$this->logger->error(
+					'importer',
+					'Import worker failed to fetch Flickr page.',
+					array(
+						'page'  => $job['current_page'],
+						'error' => $page_data->get_error_message(),
+					),
+					'worker_fetch_error'
+				);
+				delete_transient( self::LOCK_KEY );
+				return;
+			}
+
+			$page_photos = isset( $page_data['photos'] ) && is_array( $page_data['photos'] )
+				? $page_data['photos']
+				: array();
+
+			// Populate totals from first page response.
+			if ( 0 === $job['total_pages'] && isset( $page_data['pages'] ) ) {
+				$job['total_pages'] = (int) $page_data['pages'];
+			}
+			if ( 0 === $job['total_photos'] && isset( $page_data['total'] ) ) {
+				$job['total_photos'] = (int) $page_data['total'];
+			}
+
+			// Handle empty page (no photos in source).
+			if ( empty( $page_photos ) ) {
+				$job['status']       = 'completed';
+				$job['completed_at'] = time();
+				update_option( self::JOB_OPTION, $job, false );
+				$this->logger->info( 'importer', 'Import completed (no photos on page).', array(), 'import_complete' );
+				delete_transient( self::LOCK_KEY );
+				return;
+			}
+
+			// Process up to BATCH_SIZE photos starting at current_index.
+			$batch_count = 0;
+			while ( $batch_count < self::BATCH_SIZE ) {
+				$idx   = $job['current_index'];
+				$photo = isset( $page_photos[ $idx ] ) ? $page_photos[ $idx ] : null;
+
+				if ( null === $photo ) {
+					// Exhausted this page — advance to the next.
+					$job['current_page']++;
+					$job['current_index'] = 0;
+					break;
+				}
+
+				$photo_id = isset( $photo['id'] ) ? (string) $photo['id'] : '';
+
+				if ( $this->photo_exists( $photo_id ) ) {
+					$job['skipped']++;
+					$this->logger->debug(
+						'importer',
+						'Photo already in media library, skipping.',
+						array( 'photo_id' => $photo_id ),
+						'photo_skip'
+					);
+				} else {
+					$result = $this->import_photo( $photo );
+					if ( is_wp_error( $result ) ) {
+						$job['failed_items']++;
+						$this->logger->warning(
+							'importer',
+							'Failed to import photo.',
+							array(
+								'photo_id' => $photo_id,
+								'error'    => $result->get_error_message(),
+							),
+							'photo_import_error'
+						);
+					} else {
+						$job['imported']++;
+						$this->logger->debug(
+							'importer',
+							'Photo imported.',
+							array(
+								'photo_id'      => $photo_id,
+								'attachment_id' => $result,
+							),
+							'photo_imported'
+						);
+					}
+				}
+
+				$job['processed']++;
+				$job['current_index']++;
+				$batch_count++;
+			}
+
+			// Check if we've moved past the last page.
+			$all_done = $job['total_pages'] > 0 && $job['current_page'] > $job['total_pages'];
+
+			if ( $all_done ) {
+				$job['status']       = 'completed';
+				$job['completed_at'] = time();
+				update_option( self::JOB_OPTION, $job, false );
+				$this->logger->info(
+					'importer',
+					'Import job completed.',
+					array(
+						'imported'     => $job['imported'],
+						'skipped'      => $job['skipped'],
+						'failed_items' => $job['failed_items'],
+					),
+					'import_complete'
+				);
+				delete_transient( self::LOCK_KEY );
+				return;
+			}
+
+			// More work remains — persist progress, release lock, then dispatch next batch.
+			update_option( self::JOB_OPTION, $job, false );
+			delete_transient( self::LOCK_KEY );
+			$this->spawn_worker();
+
+		} catch ( \Exception $e ) {
+			$job               = $this->get_job();
+			$job['status']     = 'failed';
+			$job['last_error'] = $e->getMessage();
+			update_option( self::JOB_OPTION, $job, false );
+			$this->logger->error( 'importer', 'Unexpected exception in import worker.', array( 'error' => $e->getMessage() ), 'worker_exception' );
+			delete_transient( self::LOCK_KEY );
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// Worker dispatch
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Dispatch the next worker batch.
+	 *
+	 * Primary method: non-blocking HTTP POST to admin-ajax.php with the current
+	 * user's session cookies so WordPress can authenticate the request.
+	 * Fallback: WP-Cron single event, in case the loopback request is blocked.
+	 *
+	 * @return void
+	 */
+	private function spawn_worker() {
+		// WP-Cron fallback (fires on next page load if HTTP request fails).
+		wp_schedule_single_event( time(), self::WORKER_HOOK );
+
+		// Primary dispatch: immediate non-blocking self-request.
+		$nonce = wp_create_nonce( 'wpfp_worker_tick' );
+
+		wp_remote_post(
+			admin_url( 'admin-ajax.php' ),
+			array(
+				'timeout'   => 0.01,
+				'blocking'  => false,
+				'cookies'   => isset( $_COOKIE ) ? $_COOKIE : array(),
+				'sslverify' => apply_filters( 'https_local_ssl_verify', false ),
+				'body'      => array(
+					'action' => self::TICK_ACTION,
+					'nonce'  => $nonce,
+				),
+			)
+		);
+	}
+
+	/**
+	 * Send HTTP 200 and close the connection immediately so the caller is not
+	 * blocked waiting for this request to finish.
+	 *
+	 * @return void
+	 */
+	private function close_http_connection() {
+		if ( headers_sent() ) {
+			return;
+		}
+
+		// Disable output buffering so the headers go out immediately.
+		while ( ob_get_level() > 0 ) {
+			ob_end_clean();
+		}
+
+		header( 'Connection: close' );
+		header( 'Content-Length: 0' );
+		header( 'HTTP/1.1 200 OK' );
+
+		if ( function_exists( 'fastcgi_finish_request' ) ) {
+			fastcgi_finish_request();
+		} else {
+			flush();
+		}
+	}
+
+	// -------------------------------------------------------------------------
 	// Private helpers
 	// -------------------------------------------------------------------------
 
@@ -710,9 +810,9 @@ class WP_Flickr_Portfolio_Importer {
 	 * @return array<string,mixed>
 	 */
 	private function job_for_response( array $job ) {
-		$total    = (int) ( $job['total_photos'] ?? 0 );
+		$total     = (int) ( $job['total_photos'] ?? 0 );
 		$processed = (int) ( $job['processed'] ?? 0 );
-		$pct      = ( $total > 0 ) ? (int) min( 100, round( $processed / $total * 100 ) ) : 0;
+		$pct       = ( $total > 0 ) ? (int) min( 100, round( $processed / $total * 100 ) ) : 0;
 
 		return array(
 			'status'       => (string) ( $job['status'] ?? 'idle' ),
@@ -740,13 +840,13 @@ class WP_Flickr_Portfolio_Importer {
 
 		$results = get_posts(
 			array(
-				'post_type'      => 'attachment',
-				'post_status'    => 'any',
-				'meta_key'       => self::PHOTO_META,
-				'meta_value'     => $flickr_photo_id,
-				'fields'         => 'ids',
-				'numberposts'    => 1,
-				'no_found_rows'  => true,
+				'post_type'     => 'attachment',
+				'post_status'   => 'any',
+				'meta_key'      => self::PHOTO_META,
+				'meta_value'    => $flickr_photo_id,
+				'fields'        => 'ids',
+				'numberposts'   => 1,
+				'no_found_rows' => true,
 			)
 		);
 
@@ -798,8 +898,6 @@ class WP_Flickr_Portfolio_Importer {
 		);
 
 		if ( is_wp_error( $attachment_id ) ) {
-			// Temp file is cleaned up by media_handle_sideload on failure, but
-			// ensure it is gone if the function returned without deleting it.
 			if ( file_exists( $tmp ) ) {
 				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 				@unlink( $tmp );
